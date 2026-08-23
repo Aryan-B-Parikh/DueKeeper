@@ -30,3 +30,7 @@ mobile/google-services.json
 .env.render.secrets
 .env.render.upload
 .env.render.*
+.env.e2e
+.e2e/
+e2e/artifacts/
+test-results/

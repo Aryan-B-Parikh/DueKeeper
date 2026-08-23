@@ -30,9 +30,12 @@ function SidebarContent() {
 
   return (
     <div className="flex h-full flex-col gap-6 p-5">
-      <Link href="/dashboard" className="px-1">
-        <Logo />
-      </Link>
+      <div className="flex items-center justify-between px-1">
+        <Link href="/dashboard">
+          <Logo />
+        </Link>
+        <NotificationBell />
+      </div>
 
       <nav className="flex flex-1 flex-col gap-1.5">
         {NAV.map(({ href, label, icon: Icon }) => {

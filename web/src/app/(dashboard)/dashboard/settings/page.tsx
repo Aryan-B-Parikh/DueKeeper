@@ -1,4 +1,4 @@
-'use client';
+﻿'use client';
 
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
@@ -57,7 +57,7 @@ export default function SettingsPage() {
     if (params.get('google') === 'connected') {
       toast('success', 'Google Calendar connected');
     } else if (params.get('google') === 'error') {
-      toast('error', 'Google connection failed or expired — try again');
+      toast('error', 'Google connection failed or expired â€” try again');
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -93,12 +93,28 @@ export default function SettingsPage() {
         </h2>
         <div className="mt-4 grid gap-4 sm:grid-cols-2">
           <div>
-            <span className="label">Display name</span>
-            <input value={displayName} maxLength={80} onChange={(e) => setDisplayName(e.target.value)} className="neu-input" />
+            <label htmlFor="set-name" className="label">
+              Display name
+            </label>
+            <input
+              id="set-name"
+              value={displayName}
+              maxLength={80}
+              onChange={(e) => setDisplayName(e.target.value)}
+              className="neu-input"
+            />
           </div>
           <div>
-            <span className="label">Timezone</span>
-            <input list="tz-list" value={timezone} onChange={(e) => setTimezone(e.target.value)} className="neu-input" />
+            <label htmlFor="set-tz" className="label">
+              Timezone
+            </label>
+            <input
+              id="set-tz"
+              list="tz-list"
+              value={timezone}
+              onChange={(e) => setTimezone(e.target.value)}
+              className="neu-input"
+            />
             <datalist id="tz-list">
               {COMMON_TIMEZONES.map((tz) => (
                 <option key={tz} value={tz} />
@@ -151,7 +167,7 @@ export default function SettingsPage() {
         <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <p className="text-sm text-ink-soft">
             {!calendarStatus
-              ? 'Checking status…'
+              ? 'Checking statusâ€¦'
               : !calendarStatus.googleConfigured
                 ? 'Not configured on this server (GOOGLE_CLIENT_ID / SECRET missing). ICS import & export work without it.'
                 : calendarStatus.connected
@@ -210,7 +226,7 @@ export default function SettingsPage() {
         </h2>
         <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-center">
           <code className="min-w-0 flex-1 truncate rounded-xl bg-surface px-4 py-2.5 font-mono text-sm shadow-neu-inset">
-            {profile?.forwardingAddress ?? '…'}
+            {profile?.forwardingAddress ?? 'â€¦'}
           </code>
           <button
             className="btn-ghost shrink-0"
@@ -246,7 +262,7 @@ function RevokeSessionsButton() {
           clearToken();
           signOut();
           router.replace('/login');
-          toast('info', 'All sessions revoked — sign in again');
+          toast('info', 'All sessions revoked â€” sign in again');
         } catch (err) {
           toast('error', err instanceof Error ? err.message : 'Failed to revoke sessions');
         } finally {
@@ -289,7 +305,7 @@ function PushSection() {
       }
       const permission = await Notification.requestPermission();
       if (permission !== 'granted') {
-        toast('info', 'Permission denied — enable notifications for this site to continue');
+        toast('info', 'Permission denied â€” enable notifications for this site to continue');
         return;
       }
       const { publicKey } = await userApi.pushPublicKey();
@@ -325,7 +341,7 @@ function PushSection() {
     try {
       const result = await userApi.pushTest();
       if (result.sent > 0) toast('success', `Test push delivered to ${result.sent} device(s)`);
-      else toast('info', 'Sent, but no device confirmed receipt — try re-enabling push');
+      else toast('info', 'Sent, but no device confirmed receipt â€” try re-enabling push');
       await refresh();
     } catch (err) {
       toast('error', err instanceof Error ? err.message : 'Test failed');
@@ -337,7 +353,7 @@ function PushSection() {
   return (
     <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
       <p className="text-sm text-ink-soft">
-        {state === 'loading' && 'Checking support…'}
+        {state === 'loading' && 'Checking supportâ€¦'}
         {state === 'unavailable' && 'Not available here (needs HTTPS or a supported browser).'}
         {state === 'off' && 'Off. Enable to get reminders even when DueKeeper is closed.'}
         {state === 'on' && `Enabled on ${devices} device(s), including this browser.`}
@@ -394,8 +410,9 @@ function PasswordForm() {
       }}
     >
       <div>
-        <span className="label">Current</span>
+        <label htmlFor="pw-current" className="label">Current</label>
         <input
+          id="pw-current"
           type="password"
           required
           autoComplete="current-password"
@@ -405,8 +422,9 @@ function PasswordForm() {
         />
       </div>
       <div>
-        <span className="label">New</span>
+        <label htmlFor="pw-new" className="label">New</label>
         <input
+          id="pw-new"
           type="password"
           required
           autoComplete="new-password"
@@ -416,8 +434,9 @@ function PasswordForm() {
         />
       </div>
       <div>
-        <span className="label">Confirm new</span>
+        <label htmlFor="pw-confirm" className="label">Confirm new</label>
         <input
+          id="pw-confirm"
           type="password"
           required
           autoComplete="new-password"

@@ -123,6 +123,7 @@ if (!config.isProd) {
     log.warn('JWT_SECRET not set; using an ephemeral dev secret. Tokens will not survive restarts.');
   }
 } else {
+  const allowLocalE2E = process.env.ALLOW_LOCALHOST_E2E === '1';
   const problems: string[] = [];
   if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32) {
     problems.push('JWT_SECRET must be set to at least 32 characters');
@@ -131,10 +132,18 @@ if (!config.isProd) {
     problems.push('ENCRYPTION_KEY must be set (base64-encoded 32 bytes)');
   }
   if (config.appBaseUrl.startsWith('http://')) {
-    problems.push('APP_BASE_URL must be HTTPS in production');
+    if (allowLocalE2E) {
+      log.warn('ALLOW_LOCALHOST_E2E=1 — permitting non-HTTPS APP_BASE_URL for local end-to-end testing ONLY');
+    } else {
+      problems.push('APP_BASE_URL must be HTTPS in production');
+    }
   }
   if (config.corsAllowedOrigins.some((o) => o.includes('localhost'))) {
-    problems.push('CORS_ALLOWED_ORIGINS must not contain localhost in production');
+    if (allowLocalE2E) {
+      log.warn('ALLOW_LOCALHOST_E2E=1 — permitting localhost CORS origins for local end-to-end testing ONLY');
+    } else {
+      problems.push('CORS_ALLOWED_ORIGINS must not contain localhost in production');
+    }
   }
   if (problems.length > 0) {
     log.error('Refusing to start with unsafe production configuration');

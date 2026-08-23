@@ -109,6 +109,19 @@ export function EventCard({ event, onChanged }: EventCardProps) {
           </button>
         </div>
       )}
+
+      {terminal && (
+        <div className="flex justify-end border-t border-line/60 pt-3">
+          <button
+            disabled={busy}
+            onClick={() => run(() => eventsApi.remove(event.id))}
+            className="rounded-lg p-1.5 text-ink-soft transition hover:bg-danger/10 hover:text-danger"
+            aria-label={`Delete ${event.title}`}
+          >
+            <Trash2 className="h-4 w-4" />
+          </button>
+        </div>
+      )}
     </div>
   );
 }

@@ -56,8 +56,11 @@ export function EventForm({ initial, submitLabel, onSubmit }: EventFormProps) {
   return (
     <form onSubmit={handleSubmit} className="neu-card space-y-5 p-6 animate-fade-up">
       <div>
-        <span className="label">Title</span>
+        <label htmlFor="ef-title" className="label">
+          Title
+        </label>
         <input
+          id="ef-title"
           required
           maxLength={200}
           value={title}
@@ -69,8 +72,11 @@ export function EventForm({ initial, submitLabel, onSubmit }: EventFormProps) {
 
       <div className="grid gap-4 sm:grid-cols-2">
         <div>
-          <span className="label">Type</span>
+          <label htmlFor="ef-type" className="label">
+            Type
+          </label>
           <select
+            id="ef-type"
             value={eventType}
             onChange={(e) => setEventType(e.target.value as EventItem['eventType'])}
             className="neu-input"
@@ -82,8 +88,11 @@ export function EventForm({ initial, submitLabel, onSubmit }: EventFormProps) {
           </select>
         </div>
         <div>
-          <span className="label">Due (in selected timezone)</span>
+          <label htmlFor="ef-due" className="label">
+            Due (in selected timezone)
+          </label>
           <input
+            id="ef-due"
             required
             type="datetime-local"
             value={dueLocal}
@@ -94,8 +103,11 @@ export function EventForm({ initial, submitLabel, onSubmit }: EventFormProps) {
       </div>
 
       <div>
-        <span className="label">Notes (optional)</span>
+        <label htmlFor="ef-notes" className="label">
+          Notes (optional)
+        </label>
         <textarea
+          id="ef-notes"
           rows={2}
           maxLength={2000}
           value={description ?? ''}
@@ -106,8 +118,10 @@ export function EventForm({ initial, submitLabel, onSubmit }: EventFormProps) {
       </div>
 
       <div>
-        <span className="label">Timezone</span>
-        <input value={timezone} onChange={(e) => setTimezone(e.target.value)} className="neu-input" />
+        <label htmlFor="ef-tz" className="label">
+          Timezone
+        </label>
+        <input id="ef-tz" value={timezone} onChange={(e) => setTimezone(e.target.value)} className="neu-input" />
         <p className="mt-1 text-xs text-ink-soft">
           IANA identifier. The stored instant stays exact regardless of where you travel.
         </p>
