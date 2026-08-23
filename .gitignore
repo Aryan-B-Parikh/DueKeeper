@@ -28,3 +28,5 @@ coverage/
 # Firebase / secrets
 mobile/google-services.json
 .env.render.secrets
+.env.render.upload
+.env.render.*

@@ -6,6 +6,7 @@ services:
     dockerfilePath: Dockerfile
     plan: free
     healthCheckPath: /api/health/liveness
+    preDeployCommand: node scripts/cleanup-test-users.cjs
     disk:
       name: duekeeper-data
       mountPath: /app/data
