@@ -1,0 +1,51 @@
+{
+  "expo": {
+    "name": "DueKeeper",
+    "slug": "duekeeper",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/images/icon.png",
+    "scheme": "duekeeper",
+    "userInterfaceStyle": "automatic",
+    "ios": {
+      "bundleIdentifier": "com.duekeeper.mobile",
+      "icon": "./assets/expo.icon"
+    },
+    "android": {
+      "package": "com.duekeeper.mobile",
+      "adaptiveIcon": {
+        "backgroundColor": "#6d54eb",
+        "foregroundImage": "./assets/images/android-icon-foreground.png",
+        "backgroundImage": "./assets/images/android-icon-background.png",
+        "monochromeImage": "./assets/images/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "output": "static",
+      "favicon": "./assets/images/favicon.png"
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-splash-screen",
+        {
+          "backgroundColor": "#6d54eb",
+          "image": "./assets/images/splash-icon.png",
+          "imageWidth": 76
+        }
+      ],
+      "expo-secure-store",
+      "@react-native-community/datetimepicker",
+      [
+        "expo-notifications",
+        {
+          "color": "#6d54eb"
+        }
+      ]
+    ],
+    "experiments": {
+      "typedRoutes": true
+    }
+  }
+}

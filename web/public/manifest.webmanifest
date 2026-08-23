@@ -1,0 +1,33 @@
+{
+  "name": "DueKeeper — never miss a deadline",
+  "short_name": "DueKeeper",
+  "description": "Track exams, submissions and hackathon deadlines with reliable reminders.",
+  "id": "/",
+  "start_url": "/dashboard",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#f5f4fc",
+  "theme_color": "#6d54eb",
+  "categories": ["productivity", "education"],
+  "icons": [
+    {
+      "src": "/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}
