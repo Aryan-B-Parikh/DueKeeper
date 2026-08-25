@@ -39,3 +39,7 @@ export function formatLastSynced(iso: string | null): string {
   if (diff < 86400_000) return `Last synced ${Math.round(diff/3600000)}h ago`;
   return `Last synced ${new Date(iso).toLocaleDateString()}`;
 }
+
+export async function clearOfflineCache(): Promise<void> {
+  try { await AsyncStorage.removeItem(CACHE_KEY); await AsyncStorage.removeItem(SYNC_KEY); } catch {}
+}

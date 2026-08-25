@@ -1,6 +1,8 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import { authApi, type PublicUser } from '../lib/api';
 import { getAccessToken, clearAuth } from '../lib/tokens';
+import { clearOfflineCache } from '../lib/offline';
+import { clearQueue } from '../lib/offlineQueue';
 
 interface AuthContextValue {
   user: PublicUser | null;
@@ -32,11 +34,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const signIn = useCallback(async (email: string, password: string) => {
+    // Clear any stale cache from previous user (User A → User B brief flash)
+    await Promise.all([clearOfflineCache().catch(()=>{}), clearQueue().catch(()=>{})]);
     const payload = await authApi.login(email, password);
     setUser(payload.user);
   }, []);
 
   const signUp = useCallback(async (email: string, password: string, displayName: string) => {
+    await Promise.all([clearOfflineCache().catch(()=>{}), clearQueue().catch(()=>{})]);
     const payload = await authApi.register(email, password, displayName);
     setUser(payload.user);
   }, []);
@@ -44,6 +49,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const signOut = useCallback(async () => {
     await authApi.logout();
     setUser(null);
+    // P0/P1 security hygiene: ensure User A's cached deadlines and pending offline queue never appear for User B
+    await Promise.all([clearOfflineCache().catch(()=>{}), clearQueue().catch(()=>{})]);
   }, []);
 
   const value = useMemo(
