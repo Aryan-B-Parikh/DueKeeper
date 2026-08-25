@@ -3,8 +3,10 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { Plus, RefreshCw, Search } from 'lucide-react';
-import { eventsApi, type EventItem, type EventStatus } from '@/lib/api';
+import { eventsApi, userApi, type EventItem, type EventStatus } from '@/lib/api';
 import { EventCard } from '@/components/EventCard';
+import { UpcomingSection } from '@/components/UpcomingSection';
+import { Onboarding } from '@/components/Onboarding';
 
 type Filter = 'active' | 'upcoming' | 'due_soon' | 'overdue' | 'done' | 'all';
 
@@ -23,6 +25,7 @@ export default function OverviewPage() {
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [showOnboarding, setShowOnboarding] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -40,6 +43,13 @@ export default function OverviewPage() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    // Show onboarding once for fresh accounts (no events, not yet dismissed)
+    if (!loading && events.length === 0 && !localStorage.getItem('duekeeper:onboarded')) {
+      setShowOnboarding(true);
+    }
+  }, [loading, events.length]);
 
   const stats = useMemo(() => {
     const by = (status: EventStatus) =>
@@ -115,6 +125,15 @@ export default function OverviewPage() {
             <RefreshCw className="h-4 w-4" /> Retry
           </button>
         </div>
+      ) : showOnboarding ? (
+        <Onboarding
+          onComplete={async (prefs) => {
+            try { await userApi.updateProfile({ timezone: prefs.timezone, notificationPrefs: { reminderEmails: prefs.reminderEmails, dueSoonAlerts: prefs.dueSoonAlerts } }); } catch {}
+            localStorage.setItem('duekeeper:onboarded', '1');
+            setShowOnboarding(false);
+          }}
+          onSkip={() => { localStorage.setItem('duekeeper:onboarded', '1'); setShowOnboarding(false); }}
+        />
       ) : visibleEvents.length === 0 ? (
         query.trim() ? (
           <div className="neu-card p-10 text-center">
@@ -132,6 +151,8 @@ export default function OverviewPage() {
             </Link>
           </div>
         )
+      ) : !query.trim() && (filter === 'active' || filter === 'upcoming') ? (
+        <UpcomingSection events={visibleEvents} onChanged={() => void load()} />
       ) : (
         <div className="space-y-3">
           {visibleEvents.map((event) => (

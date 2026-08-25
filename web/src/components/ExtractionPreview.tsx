@@ -14,7 +14,7 @@ interface ExtractionPreviewProps {
 
 export function ExtractionPreview({ candidates, engine, onConfirm, onCancel }: ExtractionPreviewProps) {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(
-    new Set(candidates.filter((c) => c.confidence >= 0.6).map((c) => c.id))
+    new Set(candidates.filter((c) => c.confidence >= 0.7).map((c) => c.id))
   );
   const [edits, setEdits] = useState<Record<string, Partial<ExtractCandidate>>>({});
   const [saving, setSaving] = useState(false);
@@ -43,14 +43,15 @@ export function ExtractionPreview({ candidates, engine, onConfirm, onCancel }: E
       <div className="flex items-center gap-2 rounded-xl bg-accent-soft px-4 py-3 text-sm text-accent">
         <Sparkles className="h-4 w-4 shrink-0" />
         Found {candidates.length} candidate{candidates.length === 1 ? '' : 's'} via{' '}
-        <strong>{engine === 'gemini' ? 'Gemini AI' : 'built-in parser'}</strong>. Review, edit and confirm.
+        <strong>{engine === 'gemini' ? 'Gemini AI' : 'built-in parser'}</strong>. Detected: Title / Date / Time / Timezone / Confidence — review, edit and confirm.
       </div>
 
       {candidates.map((raw) => {
         const candidate = resolve(raw);
         const isSelected = selectedIds.has(raw.id);
+        const lowConfidence = candidate.confidence < 0.7;
         return (
-          <div key={raw.id} className={cn('neu-card p-4', !isSelected && 'opacity-60')}>
+          <div key={raw.id} className={cn('neu-card p-4', !isSelected && 'opacity-60', lowConfidence && isSelected && 'ring-1 ring-warn/30')}>
             <div className="mb-3 flex items-center justify-between gap-3">
               <label className="flex items-center gap-2 text-sm font-medium">
                 <input
@@ -69,6 +70,7 @@ export function ExtractionPreview({ candidates, engine, onConfirm, onCancel }: E
                 Include
               </label>
               <div className="flex items-center gap-2">
+                <span className="chip bg-surface text-xs">{candidate.timezone || 'UTC'}</span>
                 <ConfidenceBadge confidence={candidate.confidence} />
                 <button
                   onClick={() =>
@@ -120,10 +122,13 @@ export function ExtractionPreview({ candidates, engine, onConfirm, onCancel }: E
               </div>
             </div>
 
-            {candidate.needsClarification && (
+            {(candidate.needsClarification || lowConfidence) && (
               <p className="mt-3 flex items-center gap-1.5 text-xs text-warn">
-                <AlertTriangle className="h-3.5 w-3.5" /> Low certainty — double-check the date/time above.
+                <AlertTriangle className="h-3.5 w-3.5" /> {lowConfidence ? `Low confidence (${Math.round(candidate.confidence*100)}%) — we won’t auto-save below 70%. Please verify.` : 'Low certainty — double-check the date/time above.'}
               </p>
+            )}
+            {lowConfidence && isSelected && (
+              <p className="mt-1 text-[11px] text-ink-soft">You’re including a low-confidence item — please edit title/date/timezone before confirming.</p>
             )}
           </div>
         );
