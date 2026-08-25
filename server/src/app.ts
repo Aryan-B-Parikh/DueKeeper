@@ -4,6 +4,7 @@ import { config } from './config/env';
 import { requestContext } from './middleware/requestContext';
 import { notFoundHandler, errorHandler } from './middleware/errorHandler';
 import { metrics, snapshotMetrics } from './lib/metrics';
+import { renderPrometheus } from './lib/prometheus';
 import { outboxQueueDepth } from './engine/outbox';
 import { requireAuth } from './middleware/auth';
 import { healthRouter } from './health/health.routes';
@@ -78,9 +79,19 @@ export function createApp(): Express {
   app.use('/api/health', healthRouter);
 
   app.get('/api/metrics', requireAuth(), (_req, res) => {
-    // Counters plus a live queue read: the counters reset on restart, so on their
-    // own they cannot tell you how much is stuck right now.
     res.json({ ...snapshotMetrics(), outbox: outboxQueueDepth() });
+  });
+
+  // Prometheus scrape endpoint — unauthenticated by default (scraper is internal),
+  // but if PROMETHEUS_TOKEN is set, require Bearer or ?token (so public internet cannot enumerate behavior).
+  app.get('/metrics', (req, res) => {
+    const token = process.env.PROMETHEUS_TOKEN;
+    if (token) {
+      const auth = (req.headers.authorization as string)?.replace(/^Bearer\s+/i, '') ?? (req.query.token as string) ?? '';
+      if (auth !== token) { res.status(401).send('Unauthorized'); return; }
+    }
+    res.setHeader('Content-Type', 'text/plain; version=0.0.4; charset=utf-8');
+    res.send(renderPrometheus());
   });
 
   app.use(notFoundHandler);

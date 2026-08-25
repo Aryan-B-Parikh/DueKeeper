@@ -1,4 +1,6 @@
-# DueKeeper — Code Audit
+# Security Audit — DueKeeper — 2026-08-24 (Historical)
+
+> **Historical audit. All findings were subsequently remediated in commit c4785e860cd92bf1886438da9dfbf9dbfacbe05c (and follow-up 429e2a0 for PG/Redis). See `SECURITY.md` for current reporting.**
 
 **Scope:** `D:\DueKeeper\server` — 53 TypeScript source files, ~7k lines. Reviewed 2026-08-24 against the working tree.
 **Stack:** Express 4, TypeScript strict, `node:sqlite` (`DatabaseSync`), Zod, multer, nodemailer. Node >=24. Five runtime dependencies.
