@@ -1,4 +1,5 @@
 import { getDb } from './database';
+import { isPgEnabled, getPgPool } from './pg';
 import { migrations, type Migration } from './schema';
 import { createLogger } from '../lib/logger';
 
@@ -34,7 +35,31 @@ function applyMigration(db: ReturnType<typeof getDb>, migration: Migration): voi
   }
 }
 
-export function runMigrations(): void {
+export async function runMigrations(): Promise<void> {
+  if (isPgEnabled()) {
+    const pool = getPgPool();
+    await pool.query(`CREATE TABLE IF NOT EXISTS schema_migrations (id TEXT PRIMARY KEY, applied_at TEXT NOT NULL)`);
+    const { rows } = await pool.query<{ id: string }>('SELECT id FROM schema_migrations');
+    const applied = new Set(rows.map((r: { id: string }) => r.id));
+    let count = 0;
+    for (const migration of migrations) {
+      if (applied.has(migration.id)) continue;
+      // PG does not need PRAGMA foreign_keys dance — DDL is transactional and FKs are deferred per statement
+      await pool.query('BEGIN');
+      try {
+        await pool.query(migration.sql);
+        await pool.query('INSERT INTO schema_migrations (id, applied_at) VALUES ($1, $2)', [migration.id, new Date().toISOString()]);
+        await pool.query('COMMIT');
+      } catch (err) {
+        try { await pool.query('ROLLBACK'); } catch {}
+        throw err;
+      }
+      log.info(`Applied migration ${migration.id} (PG)`);
+      count += 1;
+    }
+    if (count === 0) log.info('Schema is up to date (PG)');
+    return;
+  }
   const db = getDb();
   db.exec(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -43,15 +68,11 @@ export function runMigrations(): void {
     );
   `);
   const applied = new Set(
-    (db.prepare('SELECT id FROM schema_migrations').all() as Array<{ id: string }>).map((r) => r.id)
+    (db.prepare('SELECT id FROM schema_migrations').all() as Array<{ id: string }>).map((r: { id: string }) => r.id)
   );
   let count = 0;
   for (const migration of migrations) {
     if (applied.has(migration.id)) continue;
-
-    // PRAGMA foreign_keys is a no-op inside a transaction, so it has to be
-    // toggled out here. Without this, DROP TABLE on a referenced table either
-    // fails or cascades away the rows we just copied.
     if (migration.rebuildsReferencedTable) {
       db.exec('PRAGMA foreign_keys = OFF;');
       try {
@@ -62,7 +83,6 @@ export function runMigrations(): void {
     } else {
       applyMigration(db, migration);
     }
-
     log.info(`Applied migration ${migration.id}`);
     count += 1;
   }

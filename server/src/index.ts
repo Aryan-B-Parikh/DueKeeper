@@ -5,6 +5,8 @@ import { startPlanner, stopPlanner } from './engine/planner';
 import { startOutboxWorker, stopOutboxWorker, outboxBusy } from './engine/outbox';
 import { closeNotificationStreams } from './modules/notifications/notifications.routes';
 import { closeDb } from './db/database';
+import { closePgPool } from './db/pg';
+import { closeRedis } from './lib/redis';
 import { createLogger } from './lib/logger';
 import { metrics } from './lib/metrics';
 
@@ -36,7 +38,7 @@ process.on('uncaughtException', (err) => {
 });
 
 async function main(): Promise<void> {
-  runMigrations();
+  await runMigrations();
 
   const app = createApp();
   const server = app.listen(config.port, () => {
@@ -98,6 +100,8 @@ async function main(): Promise<void> {
     const finish = (): void => {
       try {
         closeDb();
+        closePgPool();
+        void closeRedis().catch(() => {});
       } catch (err) {
         log.warn('Error closing database', err as Error);
       }

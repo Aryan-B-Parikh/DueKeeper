@@ -1,12 +1,47 @@
 services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: duekeeper
+      POSTGRES_PASSWORD: duekeeper
+      POSTGRES_DB: duekeeper
+    ports:
+      - '5432:5432'
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U duekeeper"]
+      interval: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - '6379:6379'
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 5
+    restart: unless-stopped
+
   api:
     build:
       context: ./server
     ports:
       - '8080:8080'
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     environment:
       NODE_ENV: production
       PORT: 8080
+      DATABASE_URL: postgres://duekeeper:duekeeper@db:5432/duekeeper
+      REDIS_URL: redis://redis:6379
       DB_PATH: /app/data/duekeeper.db
       JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in .env at repo root}
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:?set ENCRYPTION_KEY in .env at repo root}
@@ -38,3 +73,5 @@ services:
 
 volumes:
   duekeeper-data:
+  pg-data:
+  redis-data:

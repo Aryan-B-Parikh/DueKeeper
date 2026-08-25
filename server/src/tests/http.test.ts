@@ -70,14 +70,10 @@ describe('http api', () => {
   let userSeq = 0;
 
   before(async () => {
-    // A throwaway database file per run: the suite writes real rows, and pointing
-    // it at the developer's ./data/duekeeper.db would be both destructive and
-    // order-dependent. `getDb()` resolves `config.dbPath` lazily on first use, so
-    // closing the handle first is enough to redirect it.
     closeDb();
     tempDir = mkdtempSync(join(tmpdir(), 'duekeeper-http-'));
     config.dbPath = join(tempDir, 'integration.db');
-    runMigrations();
+    await runMigrations();
     config.inboxWebhookToken = INBOX_SECRET;
 
     const app = createApp();

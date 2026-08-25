@@ -76,6 +76,8 @@ export interface AppConfig {
   rateLimitMaxKeys: number;
   pushSubscriptionsPerUser: number;
   maxListPageSize: number;
+  databaseUrl?: string;
+  redisUrl?: string;
 }
 
 function str(name: string, fallback: string): string {
@@ -176,7 +178,9 @@ export const config: AppConfig = {
   sseMaxConnectionsPerUser: intInRange('SSE_MAX_CONNECTIONS_PER_USER', 5, 1, 100),
   rateLimitMaxKeys: intInRange('RATE_LIMIT_MAX_KEYS', 10000, 100, 1000000),
   pushSubscriptionsPerUser: intInRange('PUSH_SUBSCRIPTIONS_PER_USER', 20, 1, 100),
-  maxListPageSize: intInRange('MAX_LIST_PAGE_SIZE', 100, 10, 1000)
+  maxListPageSize: intInRange('MAX_LIST_PAGE_SIZE', 100, 10, 1000),
+  databaseUrl: optional('DATABASE_URL'),
+  redisUrl: optional('REDIS_URL')
 };
 
 if (!config.isProd) {

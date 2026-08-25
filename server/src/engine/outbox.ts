@@ -1,4 +1,5 @@
 import { prepare, inTransaction, queryAll, queryOne } from '../db/database';
+import { isPgEnabled, pgQuery, pgTransaction } from '../db/pg';
 import { createLogger } from '../lib/logger';
 import { nowIso } from '../lib/time';
 import { config } from '../config/env';
@@ -87,11 +88,42 @@ function reclaimExpiredLeases(): void {
   }
 }
 
-function claimJobs(): OutboxRow[] {
+async function claimJobs(): Promise<OutboxRow[]> {
+  if (isPgEnabled()) {
+    // Postgres: use FOR UPDATE SKIP LOCKED so N API instances can claim disjoint sets without
+    // BEGIN IMMEDIATE single-writer contention. Same predicate as SQLite path.
+    return pgTransaction(async (client) => {
+      const candidates = await client.query<{ id: string }>(
+        `SELECT id FROM notification_outbox
+         WHERE status = 'pending'
+           AND scheduled_at <= NOW()
+           AND (next_retry_at IS NULL OR next_retry_at <= NOW())
+         ORDER BY COALESCE(next_retry_at, scheduled_at) ASC
+         LIMIT $1
+         FOR UPDATE SKIP LOCKED`,
+        [config.outboxClaimLimit]
+      );
+      if (candidates.rows.length === 0) return [];
+      const ids = candidates.rows.map((r: { id: string }) => r.id);
+      const placeholders = ids.map((_: unknown, i: number) => `$${i + 4}`).join(',');
+      const now = nowIso();
+      const leaseUntil = new Date(Date.now() + config.outboxLeaseSeconds * 1000).toISOString();
+      const result = await client.query<OutboxRow>(
+        `UPDATE notification_outbox
+         SET status = 'processing',
+             processing_started_at = $1,
+             lease_until = $2,
+             attempts = attempts + 1,
+             updated_at = $3
+         WHERE id IN (${placeholders})
+         RETURNING id, delivery_id, payload, attempts, max_attempts`,
+        [now, leaseUntil, now, ...ids]
+      );
+      return result.rows;
+    });
+  }
   return inTransaction(() => {
     const now = nowIso();
-
-    // AUDIT C2: backoff deadline must be in predicate (see AUDIT.md §9).
     const candidates = queryAll<{ id: string }>(
       `SELECT id FROM notification_outbox
        WHERE status = 'pending'
@@ -103,13 +135,10 @@ function claimJobs(): OutboxRow[] {
       now,
       config.outboxClaimLimit
     );
-
     if (candidates.length === 0) return [];
-
     const ids = candidates.map((c) => c.id);
     const placeholders = ids.map(() => '?').join(',');
     const leaseUntil = new Date(Date.now() + config.outboxLeaseSeconds * 1000).toISOString();
-
     return queryAll<OutboxRow>(
       `UPDATE notification_outbox
        SET status = 'processing',
@@ -392,7 +421,7 @@ export async function processOnce(): Promise<number> {
 
 async function runCycle(): Promise<number> {
   try {
-    const jobs = claimJobs();
+    const jobs = await claimJobs();
     if (jobs.length === 0) return 0;
     await drain(jobs);
     return jobs.length;

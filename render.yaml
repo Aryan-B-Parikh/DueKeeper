@@ -1,23 +1,52 @@
 services:
+  - type: pserv
+    name: duekeeper-db
+    env: docker
+    dockerCommand: postgres:16-alpine
+    plan: starter
+    disk:
+      name: pg-data
+      mountPath: /var/lib/postgresql/data
+      sizeGB: 10
+    envVars:
+      - key: POSTGRES_USER
+        value: duekeeper
+      - key: POSTGRES_PASSWORD
+        generateValue: true
+      - key: POSTGRES_DB
+        value: duekeeper
+
+  - type: redis
+    name: duekeeper-redis
+    plan: starter
+    maxmemoryPolicy: allkeys-lru
+
   - type: web
     name: duekeeper-api
     runtime: docker
     rootDir: server
     dockerfilePath: Dockerfile
-    plan: free
+    plan: starter
+    numInstances: 2
     healthCheckPath: /api/health/liveness
     preDeployCommand: node scripts/cleanup-test-users.cjs
-    disk:
-      name: duekeeper-data
-      mountPath: /app/data
-      sizeGB: 1
     envVars:
       - key: NODE_ENV
         value: production
       - key: PORT
         value: 8080
+      - key: DATABASE_URL
+        fromService:
+          name: duekeeper-db
+          type: pserv
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          name: duekeeper-redis
+          type: redis
+          property: connectionString
       - key: DB_PATH
-        value: /app/data/duekeeper.db
+        value: /app/data/duekeeper.db # fallback for SQLite dev; PG when DATABASE_URL set
       - key: JWT_SECRET
         sync: false
       - key: ENCRYPTION_KEY
