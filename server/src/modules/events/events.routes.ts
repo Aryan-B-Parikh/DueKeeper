@@ -10,9 +10,14 @@ import {
   deleteEvent,
   setEventDone,
   cancelEvent,
-  snoozeEvent
+  snoozeEvent,
+  isEventStatusFilter,
+  EVENT_STATUS_FILTERS
 } from './events.service';
 import { NotFoundError, ValidationError } from '../../lib/errors';
+import { instantSchema, timezoneSchema } from '../../lib/datetimeValidation';
+import { parsePageRequest, pageMeta } from '../../lib/pagination';
+import { config } from '../../config/env';
 
 export const eventsRouter = Router();
 
@@ -31,19 +36,36 @@ const eventSchema = z.object({
   title: z.string().trim().min(1, 'Title is required').max(200),
   description: z.string().trim().max(2000).nullish(),
   eventType: z.enum(['exam', 'submission', 'hackathon', 'other']),
-  dueAt: z
-    .string()
-    .min(1, 'dueAt is required')
-    .refine((v) => !Number.isNaN(new Date(v).getTime()), 'dueAt must be a valid ISO date'),
-  timezone: z.string().trim().min(1).max(64),
+  // Both fields are strict on purpose (H5): the instant must carry its own
+  // offset so it cannot be reinterpreted in the server's zone, and the timezone
+  // must be a real IANA id because that is what the reminder planner and the
+  // "local date" grouping read. A naive `dueAt` used to be accepted here and
+  // silently parsed as server-local, which for a deadline product means the
+  // reminder fires hours off.
+  dueAt: instantSchema,
+  timezone: timezoneSchema,
   reminders: z.array(reminderSchema).max(10).optional()
 });
 
 function parseSnoozeDuration(input: unknown): string {
   const value = typeof input === 'string' ? input : '';
   const normalized = value.trim().toLowerCase();
-  if (!/^\d+[mhd]$/.test(normalized) || normalized === '0m' || normalized === '0h' || normalized === '0d') {
+  // Digits are bounded in the pattern itself, so `seconds` below cannot reach a
+  // magnitude where the arithmetic stops being exact.
+  const match = /^(\d{1,7})([mhd])$/.exec(normalized);
+  if (!match) {
     throw new ValidationError('duration must be a positive value like 30m, 2h or 1d');
+  }
+  const num = Number(match[1]);
+  const seconds = num * (match[2] === 'm' ? 60 : match[2] === 'h' ? 3600 : 86400);
+  // Catches `0m` and its zero-padded spellings (`00m`, `000d`) in one check
+  // instead of comparing against a hand-written list of them.
+  if (seconds <= 0) {
+    throw new ValidationError('duration must be a positive value like 30m, 2h or 1d');
+  }
+  // Cap to 30 days to avoid Date range overflow (H6) and absurd snoozes.
+  if (seconds > 30 * 86400) {
+    throw new ValidationError('duration must not exceed 30 days');
   }
   return normalized;
 }
@@ -52,10 +74,21 @@ eventsRouter.get(
   '/',
   handler(async (req, res) => {
     const status = typeof req.query.status === 'string' ? req.query.status : undefined;
-    if (status && !['all', 'active', 'upcoming', 'due_soon', 'overdue', 'done', 'cancelled'].includes(status)) {
-      throw new ValidationError(`Unknown status filter: ${status}`);
+    if (status !== undefined && !isEventStatusFilter(status)) {
+      throw new ValidationError(
+        `Unknown status filter: ${status}. Expected one of ${EVENT_STATUS_FILTERS.join(', ')}`
+      );
     }
-    res.json({ events: listEvents(req.user!.id, { status }) });
+    const page = parsePageRequest(req.query as Record<string, unknown>, {
+      defaultLimit: 50,
+      maxLimit: config.maxListPageSize
+    });
+    const result = listEvents(req.user!.id, { status, ...page });
+    // `events` keeps its name so existing clients keep working; `page` is what
+    // makes it possible to tell a short page from the end of the list. Without a
+    // total, a client had no way to know the previous hardcoded cap had silently
+    // truncated its results.
+    res.json({ events: result.items, page: pageMeta(page, result.total) });
   })
 );
 

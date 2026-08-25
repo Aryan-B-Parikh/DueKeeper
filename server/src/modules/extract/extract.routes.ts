@@ -9,7 +9,13 @@ import { assertValidImage } from './imageValidate';
 import { extractWithGemini, geminiConfigured, type GeminiCandidate } from './gemini';
 import { extractHeuristicCandidates } from './heuristic';
 import { createEvent } from '../events/events.service';
+import { inTransaction } from '../../db/database';
+import { createLogger } from '../../lib/logger';
 import { ExternalServiceError } from '../../lib/errors';
+import { zonedToUtcIso, isValidCivilDate } from './dateUtils';
+import { instantSchema, timezoneSchema, isValidTimezone } from '../../lib/datetimeValidation';
+
+const log = createLogger('extract');
 
 export const extractRouter = Router();
 
@@ -52,39 +58,30 @@ function mapGeminiCandidates(raw: GeminiCandidate[], timezone: string): ExtractC
     if (!item.title || !item.due_date) continue;
     const dueDate = /^\d{4}-\d{2}-\d{2}$/.test(item.due_date) ? item.due_date : null;
     if (!dueDate) continue;
+    const [y, mo, d] = dueDate.split('-').map(Number);
+    // Reject overflow dates like 2026-02-31 that JS would silently roll forward.
+    if (!isValidCivilDate(y, mo - 1, d)) continue;
+
     const dueTime = /^\d{2}:\d{2}$/.test(item.due_time ?? '') ? item.due_time! : '23:59';
-    const tz = item.timezone && item.timezone.includes('/') ? item.timezone : timezone;
-    try {
-      const [y, mo, d] = dueDate.split('-').map(Number);
-      const [h, mi] = dueTime.split(':').map(Number);
-      const naive = Date.UTC(y, mo - 1, d, h, mi);
-      const dtf = new Intl.DateTimeFormat('en-US', {
-        timeZone: tz,
-        hour12: false,
-        year: 'numeric',
-        month: '2-digit',
-        day: '2-digit',
-        hour: '2-digit',
-        minute: '2-digit',
-        second: '2-digit'
-      });
-      const parts = dtf.formatToParts(new Date(naive));
-      const get = (type: string): number => Number(parts.find((p) => p.type === type)?.value ?? '0');
-      const asUtc = Date.UTC(get('year'), get('month') - 1, get('day'), get('hour') % 24, get('minute'), get('second'));
-      const offsetMin = Math.round((asUtc - naive) / 60_000);
-      const iso = new Date(naive - offsetMin * 60_000).toISOString();
-      out.push({
-        id: `c${index}`,
-        title: String(item.title).slice(0, 200),
-        eventType: normalizeEventType(item.event_type),
-        dueAt: iso,
-        timezone: tz,
-        confidence: normalizeConfidence(item.confidence),
-        needsClarification: Boolean(item.needs_clarification)
-      });
-    } catch {
-      continue;
-    }
+    const [h, mi] = dueTime.split(':').map(Number);
+    if (h > 23 || mi > 59) continue;
+
+    // The model is free to return any string here; only accept it if it is a
+    // real IANA zone, otherwise fall back to the user's own.
+    const tzRaw = typeof item.timezone === 'string' ? item.timezone.trim().slice(0, 64) : '';
+    const tz = tzRaw && isValidTimezone(tzRaw) ? tzRaw : timezone;
+
+    const iso = zonedToUtcIso(y, mo - 1, d, h, mi, tz);
+    if (!iso) continue;
+    out.push({
+      id: `c${index}`,
+      title: String(item.title).slice(0, 200),
+      eventType: normalizeEventType(item.event_type),
+      dueAt: iso,
+      timezone: tz,
+      confidence: normalizeConfidence(item.confidence),
+      needsClarification: Boolean(item.needs_clarification)
+    });
   }
   return out;
 }
@@ -110,10 +107,10 @@ extractRouter.post(
       throw new RateLimitError(limit.retryAfterSeconds, 'Extraction rate limit reached; try again later');
     }
 
-    const userTimezone =
-      typeof req.body?.timezone === 'string' && req.body.timezone.includes('/')
-        ? req.body.timezone
-        : req.user!.timezone;
+    // A caller-supplied zone drives every date computation below, so validate it
+    // rather than pattern-matching for a slash; fall back to the profile zone.
+    const bodyTimezone = typeof req.body?.timezone === 'string' ? req.body.timezone.trim() : '';
+    const userTimezone = bodyTimezone && isValidTimezone(bodyTimezone) ? bodyTimezone : req.user!.timezone;
 
     const file = req.file;
     let text = typeof req.body?.text === 'string' ? req.body.text.trim() : '';
@@ -158,6 +155,10 @@ extractRouter.post(
         return;
       } catch (err) {
         if (!(err instanceof ExternalServiceError)) throw err;
+        // Falling back to the heuristic parser is the point of catching this, but
+        // silently is not: a permanently misconfigured key would otherwise look
+        // like a working-but-poor extractor forever.
+        log.warn(`Gemini extraction failed, falling back to heuristics: ${err.message}`);
       }
     }
 
@@ -173,8 +174,10 @@ const confirmSchema = z.object({
       z.object({
         title: z.string().trim().min(1).max(200),
         eventType: z.enum(['exam', 'submission', 'hackathon', 'other']),
-        dueAt: z.string().refine((v) => !Number.isNaN(new Date(v).getTime()), 'Invalid dueAt'),
-        timezone: z.string().trim().min(1).max(64),
+        // Same strictness as POST /events: this endpoint writes real events, so
+        // it cannot be the weaker door into the same table (H5).
+        dueAt: instantSchema,
+        timezone: timezoneSchema,
         reminders: z
           .array(
             z.object({
@@ -196,14 +199,18 @@ extractRouter.post(
     if (!parsed.success) {
       throw new ValidationError('Confirm payload invalid', zodDetails(parsed.error));
     }
-    const created = parsed.data.events.map((eventInput) =>
-      createEvent(req.user!.id, {
-        ...eventInput,
-        description: null,
-        source: parsed.data.source,
-        aiConfidence: null,
-        confirmationStatus: 'user_confirmed'
-      })
+    // All or nothing: the user confirmed a batch, and a partial write leaves them
+    // guessing which of the twenty deadlines actually saved.
+    const created = inTransaction(() =>
+      parsed.data.events.map((eventInput) =>
+        createEvent(req.user!.id, {
+          ...eventInput,
+          description: null,
+          source: parsed.data.source,
+          aiConfidence: null,
+          confirmationStatus: 'user_confirmed'
+        })
+      )
     );
     res.status(201).json({ events: created });
   })

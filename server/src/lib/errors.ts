@@ -61,8 +61,17 @@ export class ValidationError extends HttpError {
 }
 
 export class RateLimitError extends HttpError {
+  /**
+   * Exposed as a field, not just inside `details`, so the error handler can put
+   * it in the `Retry-After` header. A 429 without that header leaves every
+   * client to guess how long to wait, and the well-behaved ones guess short.
+   */
+  readonly retryAfterSeconds: number;
+
   constructor(retryAfterSeconds: number, message = 'Rate limit exceeded') {
-    super(429, 'RATE_LIMITED', message, { retryAfterSeconds });
+    const seconds = Number.isFinite(retryAfterSeconds) ? Math.max(1, Math.ceil(retryAfterSeconds)) : 1;
+    super(429, 'RATE_LIMITED', message, { retryAfterSeconds: seconds });
+    this.retryAfterSeconds = seconds;
   }
 }
 

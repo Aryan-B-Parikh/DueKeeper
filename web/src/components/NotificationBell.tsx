@@ -25,10 +25,29 @@ export function NotificationBell() {
         .catch(() => {});
     }, 120_000);
 
-    function connect() {
-      const token = getToken();
-      if (!token || !alive) return;
-      source = new EventSource(`${API_URL}/api/notifications/stream?token=${encodeURIComponent(token)}`);
+    function scheduleReconnect() {
+      if (!alive || reconnectTimer) return;
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null;
+        void connect();
+      }, 30_000);
+    }
+
+    async function connect() {
+      if (!alive || !getToken()) return;
+      let ticket: string;
+      try {
+        // A short-lived, single-use ticket rather than the access token: the
+        // stream URL ends up in access logs and browser history.
+        ticket = (await notificationsApi.streamTicket()).ticket;
+      } catch {
+        scheduleReconnect();
+        return;
+      }
+      if (!alive) return;
+      source = new EventSource(
+        `${API_URL}/api/notifications/stream?ticket=${encodeURIComponent(ticket)}`
+      );
       source.addEventListener('unread', (e) => {
         try {
           const data = JSON.parse((e as MessageEvent).data) as { count: number };
@@ -45,13 +64,18 @@ export function NotificationBell() {
           /* ignore malformed frames */
         }
       });
+      source.addEventListener('shutdown', () => {
+        // The server is restarting; reconnect on our own schedule rather than
+        // letting every client retry at once.
+        source?.close();
+        source = null;
+        scheduleReconnect();
+      });
       source.onopen = () => {};
       source.onerror = () => {
         source?.close();
         source = null;
-        if (alive) {
-          reconnectTimer = setTimeout(connect, 30_000);
-        }
+        scheduleReconnect();
       };
     }
 
@@ -61,7 +85,7 @@ export function NotificationBell() {
         if (alive) setUnread(r.unreadCount);
       })
       .catch(() => {});
-    connect();
+    void connect();
 
     return () => {
       alive = false;

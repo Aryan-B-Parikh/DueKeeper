@@ -57,7 +57,7 @@ export default function SettingsPage() {
     if (params.get('google') === 'connected') {
       toast('success', 'Google Calendar connected');
     } else if (params.get('google') === 'error') {
-      toast('error', 'Google connection failed or expired â€” try again');
+      toast('error', 'Google connection failed or expired — try again');
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -167,7 +167,7 @@ export default function SettingsPage() {
         <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <p className="text-sm text-ink-soft">
             {!calendarStatus
-              ? 'Checking statusâ€¦'
+              ? 'Checking status…'
               : !calendarStatus.googleConfigured
                 ? 'Not configured on this server (GOOGLE_CLIENT_ID / SECRET missing). ICS import & export work without it.'
                 : calendarStatus.connected
@@ -181,11 +181,7 @@ export default function SettingsPage() {
                 <DisconnectButton onDone={() => void loadAll()} />
               </>
             )}
-            {!calendarStatus?.connected && calendarStatus?.googleConfigured && (
-              <a href={calendarApi.googleStartUrl()} className="btn-primary">
-                <Link2 className="h-4 w-4" /> Connect Google
-              </a>
-            )}
+            {!calendarStatus?.connected && calendarStatus?.googleConfigured && <ConnectGoogleButton />}
           </div>
         </div>
       </section>
@@ -203,9 +199,7 @@ export default function SettingsPage() {
         </h2>
         <p className="mt-1 text-sm text-ink-soft">Download everything DueKeeper stores about you.</p>
         <div className="mt-4 flex flex-wrap gap-2">
-          <a href={`${calendarApi.exportUrl()}`} download="duekeeper.ics" className="btn-ghost">
-            <Download className="h-4 w-4" /> Export deadlines (.ics)
-          </a>
+          <ExportIcsButton />
           <ExportJsonButton />
         </div>
       </section>
@@ -226,7 +220,7 @@ export default function SettingsPage() {
         </h2>
         <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-center">
           <code className="min-w-0 flex-1 truncate rounded-xl bg-surface px-4 py-2.5 font-mono text-sm shadow-neu-inset">
-            {profile?.forwardingAddress ?? 'â€¦'}
+            {profile?.forwardingAddress ?? '…'}
           </code>
           <button
             className="btn-ghost shrink-0"
@@ -262,7 +256,7 @@ function RevokeSessionsButton() {
           clearToken();
           signOut();
           router.replace('/login');
-          toast('info', 'All sessions revoked â€” sign in again');
+          toast('info', 'All sessions revoked — sign in again');
         } catch (err) {
           toast('error', err instanceof Error ? err.message : 'Failed to revoke sessions');
         } finally {
@@ -305,7 +299,7 @@ function PushSection() {
       }
       const permission = await Notification.requestPermission();
       if (permission !== 'granted') {
-        toast('info', 'Permission denied â€” enable notifications for this site to continue');
+        toast('info', 'Permission denied — enable notifications for this site to continue');
         return;
       }
       const { publicKey } = await userApi.pushPublicKey();
@@ -341,7 +335,7 @@ function PushSection() {
     try {
       const result = await userApi.pushTest();
       if (result.sent > 0) toast('success', `Test push delivered to ${result.sent} device(s)`);
-      else toast('info', 'Sent, but no device confirmed receipt â€” try re-enabling push');
+      else toast('info', 'Sent, but no device confirmed receipt — try re-enabling push');
       await refresh();
     } catch (err) {
       toast('error', err instanceof Error ? err.message : 'Test failed');
@@ -353,7 +347,7 @@ function PushSection() {
   return (
     <div className="mt-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
       <p className="text-sm text-ink-soft">
-        {state === 'loading' && 'Checking supportâ€¦'}
+        {state === 'loading' && 'Checking support…'}
         {state === 'unavailable' && 'Not available here (needs HTTPS or a supported browser).'}
         {state === 'off' && 'Off. Enable to get reminders even when DueKeeper is closed.'}
         {state === 'on' && `Enabled on ${devices} device(s), including this browser.`}
@@ -474,6 +468,58 @@ function ExportJsonButton() {
       }}
     >
       <Copy className="h-4 w-4" /> Export everything (.json)
+    </button>
+  );
+}
+
+function ExportIcsButton() {
+  const { toast } = useToast();
+  const [busy, setBusy] = useState(false);
+  return (
+    <button
+      className="btn-ghost"
+      disabled={busy}
+      onClick={async () => {
+        setBusy(true);
+        try {
+          await calendarApi.downloadIcs();
+        } catch (err) {
+          toast('error', err instanceof Error ? err.message : 'Export failed');
+        } finally {
+          setBusy(false);
+        }
+      }}
+    >
+      <Download className="h-4 w-4" /> Export deadlines (.ics)
+    </button>
+  );
+}
+
+/**
+ * Fetches the consent URL, then navigates.
+ *
+ * This was a link straight at the API, which always failed: the route needs an
+ * Authorization header and a navigation cannot send one.
+ */
+function ConnectGoogleButton() {
+  const { toast } = useToast();
+  const [busy, setBusy] = useState(false);
+  return (
+    <button
+      className="btn-primary"
+      disabled={busy}
+      onClick={async () => {
+        setBusy(true);
+        try {
+          const { url } = await calendarApi.googleStart();
+          window.location.href = url;
+        } catch (err) {
+          toast('error', err instanceof Error ? err.message : 'Could not start Google consent');
+          setBusy(false);
+        }
+      }}
+    >
+      <Link2 className="h-4 w-4" /> Connect Google
     </button>
   );
 }

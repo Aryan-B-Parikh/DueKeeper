@@ -63,6 +63,40 @@ async function upload<T>(path: string, form: FormData): Promise<T> {
   return request<T>(path, { method: 'POST', body: form });
 }
 
+/**
+ * Fetches a file endpoint with the access token attached, then saves it.
+ *
+ * Anything under `/api` needs an `Authorization` header, and a plain
+ * `<a href="…/export.ics" download>` cannot send one — the browser navigates and
+ * the server answers 401. Every authenticated download therefore has to go
+ * through fetch and an object URL, which also lets an expired access token be
+ * refreshed and the request retried once, the way `request` does.
+ */
+async function downloadAuthenticated(path: string, filename: string, retry = true): Promise<void> {
+  const token = getToken();
+  const res = await fetch(`${API_URL}${path}`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {}
+  });
+
+  if (res.status === 401 && retry && getRefreshToken()) {
+    const refreshed = await refreshAccessToken();
+    if (refreshed) return downloadAuthenticated(path, filename, false);
+  }
+  if (!res.ok) {
+    throw new ApiError(res.status, 'DOWNLOAD_FAILED', `Could not download ${filename}`);
+  }
+
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(url);
+}
+
 export interface PublicUser {
   id: string;
   email: string;
@@ -254,6 +288,16 @@ export const notificationsApi = {
   unreadCount() {
     return request<{ unreadCount: number }>('/api/notifications/unread-count');
   },
+  /**
+   * EventSource cannot send an Authorization header, so the stream is opened
+   * with a single-use 30-second ticket instead of the access token — a URL that
+   * lands in logs should not carry a replayable credential.
+   */
+  streamTicket() {
+    return request<{ ticket: string; expiresIn: number }>('/api/notifications/stream-ticket', {
+      method: 'POST'
+    });
+  },
   markRead(id: string) {
     return request<{ ok: boolean }>(`/api/notifications/${id}/read`, { method: 'POST' });
   },
@@ -283,20 +327,7 @@ export const userApi = {
     });
   },
   async downloadExport(): Promise<void> {
-    const token = getToken();
-    const res = await fetch(`${API_URL}/api/user/export`, {
-      headers: token ? { Authorization: `Bearer ${token}` } : {}
-    });
-    if (!res.ok) throw new ApiError(res.status, 'EXPORT_FAILED', 'Could not export your data');
-    const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement('a');
-    anchor.href = url;
-    anchor.download = 'duekeeper-export.json';
-    document.body.appendChild(anchor);
-    anchor.click();
-    anchor.remove();
-    URL.revokeObjectURL(url);
+    return downloadAuthenticated('/api/user/export', 'duekeeper-export.json');
   },
   async deleteAccount() {
     return request<void>('/api/user/profile', { method: 'DELETE' });
@@ -331,16 +362,28 @@ export const calendarApi = {
   status() {
     return request<CalendarStatusResponse>('/api/calendar/status');
   },
-  exportUrl() {
-    return `${API_URL}/api/calendar/export.ics`;
+  // Not a URL: `/api/calendar/export.ics` requires the bearer header, so a plain
+  // download link answers 401.
+  downloadIcs() {
+    return downloadAuthenticated('/api/calendar/export.ics', 'duekeeper.ics');
   },
   importIcs(file: File) {
     const form = new FormData();
     form.append('file', file);
     return upload<{ imported: number; skipped: number }>('/api/calendar/import', form);
   },
-  googleStartUrl() {
-    return `${API_URL}/api/calendar/google/start`;
+  /**
+   * Asks the API for a consent URL and returns it; the caller navigates.
+   *
+   * This used to be a link straight to `/api/calendar/google/start`, which could
+   * never work — that route is authenticated by header and a top-level
+   * navigation sends none, so connecting a calendar always ended in 401. The
+   * server now mints the single-use state and hands back the Google URL.
+   */
+  googleStart() {
+    return request<{ url: string; expiresIn: number }>('/api/calendar/google/start', {
+      method: 'POST'
+    });
   },
   syncGoogle() {
     return request<{ imported: number; updated: number; scanned: number }>('/api/calendar/google/sync', {

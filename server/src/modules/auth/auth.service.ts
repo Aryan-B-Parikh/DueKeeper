@@ -6,6 +6,14 @@ import { ConflictError, UnauthorizedError } from '../../lib/errors';
 import { uuid, token as randomToken } from '../../lib/ids';
 import { nowIso } from '../../lib/time';
 
+/**
+ * A real scrypt hash of a throwaway password, computed once at startup. When a
+ * login names an account that does not exist, we verify against this instead of
+ * returning early — otherwise a missing account answers in microseconds while a
+ * real one takes the full scrypt time, and that gap enumerates valid emails.
+ */
+const DUMMY_PASSWORD_HASH = hashPassword(randomToken(24));
+
 export interface PublicUser {
   id: string;
   email: string;
@@ -83,7 +91,12 @@ export function loginUser(
 ): TokenPair & { user: PublicUser } {
   const normalized = email.trim().toLowerCase();
   const row = getUserRowByEmail(normalized);
-  if (!row || !verifyPassword(password, row.password_hash)) {
+
+  // Always spend one scrypt verification, whether or not the account exists, so
+  // the two cases take indistinguishable time. Both branches also raise the same
+  // error, so neither timing nor message reveals whether the email is registered.
+  const passwordOk = verifyPassword(password, row?.password_hash ?? DUMMY_PASSWORD_HASH);
+  if (!row || !passwordOk) {
     throw new UnauthorizedError('Incorrect email or password');
   }
   return { ...issueTokenPair(row), user: toPublicUser(row) };

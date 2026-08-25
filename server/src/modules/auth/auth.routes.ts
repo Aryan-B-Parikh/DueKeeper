@@ -11,8 +11,11 @@ import { config } from '../../config/env';
 
 export const authRouter = Router();
 
-const loginLimiter = createRateLimiter({ windowMs: 15 * 60_000, max: config.loginRateLimit });
-const registerLimiter = createRateLimiter({ windowMs: 60 * 60_000, max: config.registerRateLimit });
+const loginLimiter = createRateLimiter({ windowMs: 15 * 60_000, max: config.loginRateLimit, maxKeys: config.rateLimitMaxKeys });
+const registerLimiter = createRateLimiter({ windowMs: 60 * 60_000, max: config.registerRateLimit, maxKeys: config.rateLimitMaxKeys });
+const ipLoginLimiter = createRateLimiter({ windowMs: 15 * 60_000, max: 30, maxKeys: config.rateLimitMaxKeys });
+const refreshLimiter = createRateLimiter({ windowMs: 15 * 60_000, max: 30, maxKeys: config.rateLimitMaxKeys });
+const logoutLimiter = createRateLimiter({ windowMs: 15 * 60_000, max: 30, maxKeys: config.rateLimitMaxKeys });
 
 const passwordSchema = z
   .string()
@@ -32,9 +35,11 @@ const loginSchema = z.object({
   password: z.string().min(1, 'Password is required')
 });
 
-function clientIp(req: { headers: Record<string, unknown>; ip?: string }): string {
-  const forwarded = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim();
-  return forwarded || req.ip || 'local';
+function clientIp(req: { ip?: string }): string {
+  // app.set('trust proxy', 1) already makes req.ip respect X-Forwarded-For
+  // via the trusted proxy hop. Do NOT parse the header manually — that trusts
+  // an attacker-controlled header unconditionally.
+  return req.ip || 'local';
 }
 
 authRouter.post(
@@ -54,7 +59,12 @@ authRouter.post(
   '/login',
   handler(async (req, res) => {
     const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : 'anonymous';
-    const limit = loginLimiter.take(`${email}|${clientIp(req)}`);
+    const ip = clientIp(req);
+    const ipLimit = ipLoginLimiter.take(ip);
+    if (!ipLimit.allowed) {
+      throw new RateLimitError(ipLimit.retryAfterSeconds, 'Too many sign-in attempts from this address; try again later');
+    }
+    const limit = loginLimiter.take(`${email}|${ip}`);
     if (!limit.allowed) {
       throw new RateLimitError(limit.retryAfterSeconds, 'Too many sign-in attempts; try again later');
     }
@@ -69,6 +79,8 @@ const refreshSchema = z.object({ refreshToken: z.string().min(20).max(200) });
 authRouter.post(
   '/refresh',
   handler(async (req, res) => {
+    const limit = refreshLimiter.take(clientIp(req));
+    if (!limit.allowed) throw new RateLimitError(limit.retryAfterSeconds, 'Too many refresh attempts');
     const body = parseWith(refreshSchema, req.body);
     const result = rotateRefreshToken(body.refreshToken);
     if (!result.ok || !result.pair) {
@@ -81,6 +93,8 @@ authRouter.post(
 authRouter.post(
   '/logout',
   handler(async (req, res) => {
+    const limit = logoutLimiter.take(clientIp(req));
+    if (!limit.allowed) throw new RateLimitError(limit.retryAfterSeconds, 'Too many requests');
     const raw = typeof req.body?.refreshToken === 'string' ? req.body.refreshToken : '';
     if (raw.length >= 20) revokeRefreshToken(raw);
     res.status(204).send();

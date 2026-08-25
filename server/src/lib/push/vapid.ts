@@ -1,4 +1,4 @@
-import { createECDH, createPrivateKey, createPublicKey, randomBytes, sign as cryptoSign } from 'crypto';
+import { createECDH, createPrivateKey, sign as cryptoSign } from 'crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { dirname, resolve } from 'path';
 import { config } from '../../config/env';
@@ -11,14 +11,32 @@ export interface VapidKeys {
   privateKey: string;
 }
 
+const P256_SCALAR_BYTES = 32;
+
 function b64url(buf: Buffer): string {
   return buf.toString('base64url');
+}
+
+/**
+ * OpenSSL returns EC scalars as minimal big-endian integers, so a private key
+ * whose top byte(s) happen to be zero comes back shorter than 32 bytes (~1 key
+ * in 256). RFC 7518 §6.2.2.1 requires the JWK "d" parameter to be exactly the
+ * full coordinate length, and Node's createPrivateKey rejects anything else, so
+ * those keys would fail at signing time and only in production. Left-pad.
+ */
+function padScalar(raw: Buffer): Buffer {
+  if (raw.length === P256_SCALAR_BYTES) return raw;
+  if (raw.length > P256_SCALAR_BYTES) throw new Error('EC scalar longer than P-256 field size');
+  return Buffer.concat([Buffer.alloc(P256_SCALAR_BYTES - raw.length), raw]);
 }
 
 export function generateVapidKeys(): VapidKeys {
   const ecdh = createECDH('prime256v1');
   ecdh.generateKeys();
-  return { publicKey: b64url(ecdh.getPublicKey()), privateKey: b64url(ecdh.getPrivateKey()) };
+  return {
+    publicKey: b64url(ecdh.getPublicKey()),
+    privateKey: b64url(padScalar(ecdh.getPrivateKey()))
+  };
 }
 
 let cached: VapidKeys | null = null;
@@ -84,13 +102,17 @@ interface JwkEc {
   d?: string;
 }
 
-export function buildVapidAuthorization(endpoint: string): string {
-  const keys = getVapidKeys();
-  if (!keys) throw new Error('VAPID keys unavailable');
-  const origin = new URL(endpoint).origin;
+let cachedSigningKey: { publicKey: string; key: ReturnType<typeof createPrivateKey> } | null = null;
+
+function vapidSigningKey(keys: VapidKeys): ReturnType<typeof createPrivateKey> {
+  if (cachedSigningKey && cachedSigningKey.publicKey === keys.publicKey) return cachedSigningKey.key;
 
   const pubPoint = Buffer.from(keys.publicKey, 'base64url');
-  const privRaw = Buffer.from(keys.privateKey, 'base64url');
+  if (pubPoint.length !== 65 || pubPoint[0] !== 0x04) {
+    throw new Error('VAPID public key must be a 65-byte uncompressed P-256 point');
+  }
+  const privRaw = padScalar(Buffer.from(keys.privateKey, 'base64url'));
+
   const jwk: JwkEc = {
     kty: 'EC',
     crv: 'P-256',
@@ -98,10 +120,20 @@ export function buildVapidAuthorization(endpoint: string): string {
     y: b64url(pubPoint.subarray(33, 65)),
     d: b64url(privRaw)
   };
-  const privateKey = createPrivateKey({ key: jwk as unknown as Record<string, string>, format: 'jwk' });
+  const key = createPrivateKey({ key: jwk as unknown as Record<string, string>, format: 'jwk' });
+  cachedSigningKey = { publicKey: keys.publicKey, key };
+  return key;
+}
+
+export function buildVapidAuthorization(endpoint: string): string {
+  const keys = getVapidKeys();
+  if (!keys) throw new Error('VAPID keys unavailable');
+  const origin = new URL(endpoint).origin;
+  const privateKey = vapidSigningKey(keys);
 
   const claims = {
     aud: origin,
+    // RFC 8292 §2 caps the token lifetime at 24h; 12h leaves room for clock skew.
     exp: Math.floor(Date.now() / 1000) + 12 * 3600,
     sub: vapidSubject()
   };

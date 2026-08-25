@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { requireAuth } from '../../middleware/auth';
 import { handler, parseWith } from '../../middleware/validate';
-import { prepare } from '../../db/database';
+import { prepare, inTransaction } from '../../db/database';
 import { toPublicUser, getUserRowById, insertNotification } from '../auth/auth.service';
 import { config } from '../../config/env';
 import { nowIso } from '../../lib/time';
@@ -10,31 +10,22 @@ import { hashPassword, verifyPassword } from '../../lib/password';
 import { UnauthorizedError, ValidationError } from '../../lib/errors';
 import { getVapidKeys } from '../../lib/push/vapid';
 import { uuid } from '../../lib/ids';
+import { revokeAllSessions } from '../../lib/tokens';
+import { createRateLimiter } from '../../lib/rateLimit';
+import { RateLimitError } from '../../lib/errors';
+import { timezoneSchema } from '../../lib/datetimeValidation';
+
+const passwordLimiter = createRateLimiter({ windowMs: 15 * 60_000, max: 10, maxKeys: config.rateLimitMaxKeys });
 
 export const usersRouter = Router();
 
 usersRouter.use(requireAuth());
 
-const TIMEZONE_RE = /^[A-Za-z_]+\/[A-Za-z_0-9+\-]+$/;
-
-function isValidTimezone(tz: string): boolean {
-  if (tz === 'UTC') return true;
-  try {
-    new Intl.DateTimeFormat('en-US', { timeZone: tz });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 const profileUpdateSchema = z.object({
   displayName: z.string().trim().min(1).max(80).optional(),
-  timezone: z
-    .string()
-    .trim()
-    .refine((v) => v === 'UTC' || TIMEZONE_RE.test(v), 'Timezone must be an IANA identifier')
-    .refine((v) => isValidTimezone(v), 'Unknown timezone')
-    .optional(),
+  // Shared with the event write paths so a profile zone can never be something
+  // the reminder planner cannot interpret.
+  timezone: timezoneSchema.optional(),
   notificationPrefs: z
     .object({
       reminderEmails: z.boolean().optional(),
@@ -113,6 +104,8 @@ const passwordChangeSchema = z.object({
 usersRouter.post(
   '/password',
   handler(async (req, res) => {
+    const limit = passwordLimiter.take(req.user!.id);
+    if (!limit.allowed) throw new RateLimitError(limit.retryAfterSeconds, 'Too many password change attempts; try again later');
     const body = parseWith(passwordChangeSchema, req.body);
     const row = getUserRowById(req.user!.id);
     if (!row || !verifyPassword(body.currentPassword, row.password_hash)) {
@@ -123,11 +116,18 @@ usersRouter.post(
         error: { code: 'VALIDATION_ERROR', message: 'New password must differ from the current one' }
       });
     }
-    prepare('UPDATE users SET password_hash = ?, token_version = token_version + 1, updated_at = ? WHERE id = ?').run(
-      hashPassword(body.newPassword),
-      nowIso(),
-      req.user!.id
-    );
+    // The new hash and the session revocation must commit together: a crash
+    // between them would either change the password while leaving the attacker's
+    // stolen sessions live, or revoke sessions without changing the password.
+    const newHash = hashPassword(body.newPassword);
+    inTransaction(() => {
+      prepare('UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?').run(
+        newHash,
+        nowIso(),
+        req.user!.id
+      );
+      revokeAllSessions(req.user!.id);
+    });
     res.json({ ok: true, sessionsRevoked: true });
   })
 );
@@ -135,8 +135,7 @@ usersRouter.post(
 usersRouter.post(
   '/sessions/revoke-all',
   handler(async (req, res) => {
-    const result = prepare('UPDATE users SET token_version = token_version + 1 WHERE id = ?').run(req.user!.id);
-    res.json({ ok: result.changes > 0 });
+    res.json({ ok: revokeAllSessions(req.user!.id) });
   })
 );
 
@@ -167,10 +166,36 @@ usersRouter.post(
   '/push/expo',
   handler(async (req, res) => {
     const body = parseWith(expoTokenSchema, req.body);
-    prepare(
-      `INSERT INTO expo_push_tokens (id, user_id, token, created_at) VALUES (?, ?, ?, ?)
-       ON CONFLICT(token) DO UPDATE SET user_id = excluded.user_id`
-    ).run(uuid(), req.user!.id, body.token, nowIso());
+    // Ownership check, device cap and upsert are one transaction. Read-then-write
+    // across three statements let two concurrent requests both pass the check and
+    // then both write — the cap could be exceeded, and a token belonging to
+    // another account could be taken over in the gap. `BEGIN IMMEDIATE`
+    // serializes writers, so the check now describes the state the write lands in.
+    inTransaction(() => {
+      const existing = prepare('SELECT user_id FROM expo_push_tokens WHERE token = ?').get(body.token) as
+        | { user_id: string }
+        | undefined;
+      if (existing && existing.user_id !== req.user!.id) {
+        throw new ValidationError('Expo token already registered to another account');
+      }
+      if (countExpoDevices(req.user!.id) >= config.pushSubscriptionsPerUser) {
+        const owned = prepare('SELECT token FROM expo_push_tokens WHERE user_id = ?').all(req.user!.id) as Array<{ token: string }>;
+        if (!owned.some((r) => r.token === body.token)) {
+          throw new ValidationError('Push device limit reached');
+        }
+      }
+      // The `WHERE` on the conflict clause makes the ownership rule part of the
+      // statement rather than only part of the preceding check: an unguarded
+      // `DO UPDATE SET user_id = excluded.user_id` reassigns whatever row it hits.
+      const result = prepare(
+        `INSERT INTO expo_push_tokens (id, user_id, token, created_at) VALUES (?, ?, ?, ?)
+         ON CONFLICT(token) DO UPDATE SET user_id = excluded.user_id
+         WHERE expo_push_tokens.user_id = excluded.user_id`
+      ).run(uuid(), req.user!.id, body.token, nowIso());
+      if (result.changes === 0) {
+        throw new ValidationError('Expo token already registered to another account');
+      }
+    });
     res.status(201).json({ ok: true });
   })
 );
@@ -197,14 +222,35 @@ usersRouter.post(
   handler(async (req, res) => {
     if (!pushKeysAvailable()) throw new ValidationError('Push is not available on this server');
     const body = parseWith(subscribeSchema, req.body);
-    prepare(
-      `INSERT INTO push_subscriptions (id, user_id, endpoint, p256dh, auth, created_at)
-       VALUES (?, ?, ?, ?, ?, ?)
-       ON CONFLICT(endpoint) DO UPDATE SET
-         user_id = excluded.user_id,
-         p256dh = excluded.p256dh,
-         auth = excluded.auth`
-    ).run(uuid(), req.user!.id, body.endpoint, body.keys.p256dh, body.keys.auth, nowIso());
+    // Same reasoning as /push/expo: check and write in one transaction, and make
+    // the ownership rule part of the conflict clause as well as the check.
+    inTransaction(() => {
+      const existing = prepare('SELECT user_id FROM push_subscriptions WHERE endpoint = ?').get(body.endpoint) as
+        | { user_id: string }
+        | undefined;
+      if (existing && existing.user_id !== req.user!.id) {
+        throw new ValidationError('Push subscription already registered to another account');
+      }
+      const count = prepare('SELECT COUNT(*) as c FROM push_subscriptions WHERE user_id = ?').get(req.user!.id) as { c: number };
+      if (Number(count.c) >= config.pushSubscriptionsPerUser) {
+        const owned = prepare('SELECT endpoint FROM push_subscriptions WHERE user_id = ?').all(req.user!.id) as Array<{ endpoint: string }>;
+        if (!owned.some((r) => r.endpoint === body.endpoint)) {
+          throw new ValidationError('Push subscription limit reached');
+        }
+      }
+      const result = prepare(
+        `INSERT INTO push_subscriptions (id, user_id, endpoint, p256dh, auth, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(endpoint) DO UPDATE SET
+           user_id = excluded.user_id,
+           p256dh = excluded.p256dh,
+           auth = excluded.auth
+         WHERE push_subscriptions.user_id = excluded.user_id`
+      ).run(uuid(), req.user!.id, body.endpoint, body.keys.p256dh, body.keys.auth, nowIso());
+      if (result.changes === 0) {
+        throw new ValidationError('Push subscription already registered to another account');
+      }
+    });
     res.status(201).json({ ok: true });
   })
 );

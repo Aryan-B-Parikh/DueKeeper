@@ -1,4 +1,4 @@
-import { prepare } from '../db/database';
+import { prepare, queryAll } from '../db/database';
 import { createLogger } from '../lib/logger';
 import { sendWebPush } from '../lib/push/webpush';
 import { getVapidKeys } from '../lib/push/vapid';
@@ -24,9 +24,10 @@ export function pushAvailable(): boolean {
 
 export async function sendPushToUser(userId: string, notification: PushNotificationInput): Promise<{ sent: number; removed: number }> {
   if (!pushAvailable()) return { sent: 0, removed: 0 };
-  const rows = prepare(
-    'SELECT endpoint, p256dh, auth FROM push_subscriptions WHERE user_id = ?'
-  ).all(userId) as unknown as SubscriptionRow[];
+  const rows = queryAll<SubscriptionRow>(
+    'SELECT endpoint, p256dh, auth FROM push_subscriptions WHERE user_id = ?',
+    userId
+  );
 
   let sent = 0;
   let removed = 0;
@@ -43,10 +44,15 @@ export async function sendPushToUser(userId: string, notification: PushNotificat
         } else if (result.gone) {
           prepare('DELETE FROM push_subscriptions WHERE endpoint = ?').run(row.endpoint);
           removed += 1;
-        } else if (result.status !== 0) {
-          log.warn(`Push to ${row.endpoint.slice(0, 48)}… returned ${result.status}`);
+        } else {
+          // Include status 0 (network/timeout) — previously suppressed, hiding total push outage.
+          metrics.pushesFailed = (metrics.pushesFailed ?? 0) + 1;
+          log.warn(`Push to ${row.endpoint.slice(0, 48)}… failed with status ${result.status}`);
         }
       } catch (err) {
+        // Counted as well as logged: a thrown error is still a push the user
+        // never got, and an uncounted one makes the failure metric lie.
+        metrics.pushesFailed = (metrics.pushesFailed ?? 0) + 1;
         log.warn('Push delivery failed unexpectedly', err as Error);
       }
     })

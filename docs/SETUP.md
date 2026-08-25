@@ -22,8 +22,14 @@ Open http://localhost:3000 → register → add deadlines. The SQLite file is cr
 ```bash
 cd server
 npm run typecheck      # strict TS, zero errors
-npm run smoke          # 40-check end-to-end suite (needs the API running)
+npm test               # unit + HTTP integration suite, no server needed
+npm run smoke          # 101-check end-to-end suite (needs the API running)
 ```
+
+`npm test` is the one to run in CI: it boots the app in-process against a temporary
+database and needs nothing external. `npm run smoke` talks to a live server over
+HTTP and deliberately sleeps ~150 s waiting for the planner and outbox to deliver a
+real reminder, so it is the slower, end-to-end confirmation rather than the inner loop.
 
 ## Environment variables — server (`server/.env`, see `.env.example`)
 
@@ -37,13 +43,14 @@ npm run smoke          # 40-check end-to-end suite (needs the API running)
 | `JWT_SECRET` | yes | ≥32 random chars in prod; dev falls back to an ephemeral secret with a warning |
 | `JWT_EXPIRES_IN` | – | e.g. `7d` |
 | `ENCRYPTION_KEY` | yes (prod) | base64 of 32 bytes → generate: `node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"` |
+| `PREVIOUS_ENCRYPTION_KEYS` | – | comma-separated older `ENCRYPTION_KEY` values, newest first, so rotation does not orphan already-encrypted rows. Each entry must itself be base64 of 32 bytes — production **refuses to start** on a malformed one rather than skipping it, since a silently dropped key means the rows it protects can no longer be read |
 | `CORS_ALLOWED_ORIGINS` | yes | comma-separated origins, e.g. `https://app.yourdomain.com` |
 | `GEMINI_API_KEY` | optional | enables AI extraction (text + screenshots). Without it, text extraction uses the built-in heuristic parser |
 | `GEMINI_MODEL` | – | default `gemini-2.5-flash` |
 | `SMTP_HOST` / `SMTP_PORT` / `SMTP_USER` / `SMTP_PASS` | optional | real email delivery; without it emails log to console as `[DEV EMAIL]` |
 | `EMAIL_FROM` | – | e.g. `"DueKeeper <no-reply@yourdomain.com>"` |
 | `INBOX_DOMAIN` | – | domain for forwarding addresses, default `inbox.duekeeper.local` |
-| `INBOX_WEBHOOK_TOKEN` | optional | long random string; enables `/api/inbox/webhook/:token` when set |
+| `INBOX_WEBHOOK_TOKEN` | optional | long random string; enables `POST /api/inbox/webhook` when set. Senders present it in the `X-Inbox-Token` header, never in the URL |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | optional | enables Google Calendar sync |
 | `GOOGLE_REDIRECT_URI` | optional | override the OAuth redirect URI if your Google client already registers a specific path (default `<APP_BASE_URL>/api/calendar/google/callback`; the callback is also always served at `/api/calendar/sync/callback`) |
 | `VAPID_PUBLIC_KEY` / `VAPID_PRIVATE_KEY` | optional | Web Push server keys. In dev, a keypair is auto-generated and cached at `server/data/vapid.json`; in production set both (generate with `node scripts/generate-vapid.mjs`) — without them browser push is disabled but everything else works |
@@ -71,9 +78,15 @@ All integrations are **optional** — the app is fully usable with none of them.
 ### Inbox forwarding (SendGrid Inbound Parse)
 1. Own a domain. Set `INBOX_DOMAIN=yourdomain.com` and any long random `INBOX_WEBHOOK_TOKEN`.
 2. In SendGrid: Inbound Parse → MX record on the subdomain → POST URL:
-   `https://<your-api>/api/inbox/webhook/<INBOX_WEBHOOK_TOKEN>` (check "spam" off, raw off).
+   `https://<your-api>/api/inbox/webhook` (check "spam" off, raw off), and add the
+   header `X-Inbox-Token: <INBOX_WEBHOOK_TOKEN>` to the destination.
+   The secret does **not** go in the URL — access logs, proxies and `Referer` headers
+   record URLs by default, so a token there leaks to everything in the request path.
+   If your provider cannot set custom headers, `Authorization: Bearer <token>` works too.
 3. Each user's address (`deadline+<token>@yourdomain.com`) appears under Settings → Forwarding address.
-4. Local testing: use ngrok and point SendGrid at your tunnel URL.
+4. Local testing: use ngrok and point SendGrid at your tunnel URL. From the shell:
+   `curl -X POST https://<host>/api/inbox/webhook -H "X-Inbox-Token: $INBOX_WEBHOOK_TOKEN"
+   --data-urlencode "to=deadline+<token>@yourdomain.com" --data-urlencode "subject=Essay due 2026-12-04 at 17:00"`
 
 ### Google Calendar sync
 1. Google Cloud Console → OAuth client (Web application). Authorized redirect URI:
@@ -94,8 +107,13 @@ All integrations are **optional** — the app is fully usable with none of them.
 | "Screenshot tab disabled" banner | Expected without `GEMINI_API_KEY`; paste text instead |
 | Emails show as `[DEV EMAIL]` logs | Set SMTP_* vars for real delivery |
 | Inbox webhook returns 404 | `INBOX_WEBHOOK_TOKEN` not set |
+| Inbox webhook returns 403 | The secret is missing or wrong. It must arrive as a header (`X-Inbox-Token`); a token in the URL path or query is no longer accepted |
+| Inbox webhook accepts but nothing is saved (`ignored: "unresolved-recipient"`) | The `to` field is not a `deadline+<token>@<INBOX_DOMAIN>` address. Recipients are resolved from `to` alone — `from` is ignored because it is spoofable |
 | Google button hidden | `GOOGLE_CLIENT_ID/SECRET` not set |
+| `405` from `/api/calendar/google/start` | An old client is treating it as a link. It is now `POST` and returns `{ url }` for the client to navigate to — the redirecting `GET` could not work, because a browser navigation sends no `Authorization` header |
 | Reminders don't fire | Check event has reminders within the next 7 days; engine cycles every 60s/30s; watch server logs for `planner`/`outbox` entries |
+| Everyone signed out at once | Someone changed their password or called `/api/user/sessions/revoke-all`; both bump the account's token version by design |
+| `422` on a `dueAt` that "looks fine" | It needs an explicit offset (`…T09:00:00+05:30` or `…Z`). Naive local times are rejected rather than guessed at |
 | Tokens reset on server restart (dev) | You're running without `JWT_SECRET` — set one |
 
 ## Mobile app (Expo)

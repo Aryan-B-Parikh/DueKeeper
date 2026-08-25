@@ -30,7 +30,21 @@ async function api(method, path, { token, body, raw } = {}) {
   } catch {
     json = null;
   }
-  return { status: res.status, json, text };
+  return { status: res.status, json, text, headers: res.headers };
+}
+
+/**
+ * Streams have to be closed by hand or the per-user connection cap (default 5)
+ * closes the door on the checks that follow.
+ */
+async function closeStream(res) {
+  try {
+    await res.body?.cancel();
+  } catch {
+    /* already closed */
+  }
+  // Give the server's 'close' handler a moment to release the subscription slot.
+  await new Promise((r) => setTimeout(r, 100));
 }
 
 function isoIn(ms) {
@@ -127,6 +141,27 @@ const mainRefresh = reg.json.refreshToken;
   });
   ok('invalid reminder channel+offset rejected', badReminder.status === 422);
 
+  // The datetime contract, which is a deliberate breaking change: a naive local
+  // time used to be read in whatever zone the server process happened to run in,
+  // which shifted every reminder for the deadline without telling anyone.
+  const naiveDue = await api('POST', '/api/events', {
+    token,
+    body: { title: 'Naive time', eventType: 'other', dueAt: '2026-09-01T09:00:00', timezone: 'Asia/Kolkata' }
+  });
+  ok('dueAt without an explicit offset rejected (422)', naiveDue.status === 422);
+
+  const impossibleDue = await api('POST', '/api/events', {
+    token,
+    body: { title: 'Feb 31st', eventType: 'other', dueAt: '2026-02-31T09:00:00+05:30', timezone: 'Asia/Kolkata' }
+  });
+  ok('impossible civil date rejected instead of rolled forward (422)', impossibleDue.status === 422);
+
+  const offsetZone = await api('POST', '/api/events', {
+    token,
+    body: { title: 'Offset as zone', eventType: 'other', dueAt: isoIn(3600_000), timezone: '+05:30' }
+  });
+  ok('fixed offset refused as a timezone (422)', offsetZone.status === 422);
+
   const upd = await api('PUT', `/api/events/${eventId}`, {
     token,
     body: {
@@ -142,6 +177,32 @@ const mainRefresh = reg.json.refreshToken;
 
   const otherList = await api('GET', `/api/events/${eventId}x`, { token });
   ok('unknown event id -> 404', otherList.status === 404);
+
+  console.log('\n[pagination envelope]');
+  const paged = await api('GET', '/api/events?limit=2&offset=0', { token });
+  ok(
+    'list answers with a page envelope beside the items',
+    paged.status === 200 &&
+      Array.isArray(paged.json?.events) &&
+      paged.json.events.length <= 2 &&
+      paged.json?.page?.limit === 2 &&
+      paged.json?.page?.offset === 0 &&
+      typeof paged.json?.page?.total === 'number' &&
+      typeof paged.json?.page?.hasMore === 'boolean'
+  );
+  const clamped = await api('GET', '/api/events?limit=100000', { token });
+  ok(
+    'an oversized limit is clamped, not an error',
+    clamped.status === 200 && clamped.json?.page?.limit > 0 && clamped.json.page.limit <= 1000
+  );
+  // Silently defaulting a malformed parameter hands the client a plausible-looking
+  // wrong page, which is worse than a 422.
+  const badLimit = await api('GET', '/api/events?limit=abc', { token });
+  ok('malformed limit rejected (422)', badLimit.status === 422);
+  const badOffset = await api('GET', '/api/events?offset=-5', { token });
+  ok('negative offset rejected (422)', badOffset.status === 422);
+  const badStatus = await api('GET', '/api/events?status=nonsense', { token });
+  ok('unknown status filter rejected (422)', badStatus.status === 422);
 
   console.log('\n[status lifecycle]');
   const soon = await api('POST', '/api/events', {
@@ -170,6 +231,13 @@ const mainRefresh = reg.json.refreshToken;
 
   const done = await api('POST', `/api/events/${soon.json.event.id}/done`, { token });
   ok('mark done sets terminal status', done.json?.event?.status === 'done');
+
+  // Snoozing a finished deadline used to resurrect it and re-arm its reminders.
+  const snoozeDone = await api('POST', `/api/events/${soon.json.event.id}/snooze`, {
+    token,
+    body: { duration: '2h' }
+  });
+  ok('snoozing a done event rejected (422)', snoozeDone.status === 422);
 
   console.log('\n[extraction]');
   const extract = await api('POST', '/api/events/extract', {
@@ -286,12 +354,60 @@ const mainRefresh = reg.json.refreshToken;
   ok('read-all succeeds', readAll.status === 200);
 
   console.log('\n[inbox webhook security]');
-  const inboxOff = await api('POST', '/api/inbox/webhook?token=whatever', { body: { subject: 'x' } });
-  ok('inbox webhook disabled without config (404/403)', inboxOff.status === 404 || inboxOff.status === 403);
+  const inboxForm = () =>
+    new URLSearchParams({ to: 'deadline+00112233445566778899@example.test', subject: 'x' }).toString();
+  const inboxHeaders = { 'Content-Type': 'application/x-www-form-urlencoded' };
+
+  const inboxOff = await fetch(`${BASE}/api/inbox/webhook`, {
+    method: 'POST',
+    headers: { ...inboxHeaders, 'X-Inbox-Token': 'whatever' },
+    body: inboxForm()
+  });
+  ok(
+    'inbox webhook rejects an unknown secret (404 unconfigured, 403 configured)',
+    inboxOff.status === 404 || inboxOff.status === 403
+  );
+
+  // The secret is header-only now. A token in a URL is captured by proxy and
+  // web-server access logs, browser history and Referer headers, so the `?token=`
+  // and `/webhook/:token` forms were removed rather than kept as a fallback.
+  const inboxQueryToken = await fetch(`${BASE}/api/inbox/webhook?token=whatever`, {
+    method: 'POST',
+    headers: inboxHeaders,
+    body: inboxForm()
+  });
+  ok(
+    'query-string webhook secret no longer authenticates (404/403)',
+    inboxQueryToken.status === 404 || inboxQueryToken.status === 403
+  );
+  const inboxPathToken = await fetch(`${BASE}/api/inbox/webhook/whatever`, {
+    method: 'POST',
+    headers: inboxHeaders,
+    body: inboxForm()
+  });
+  ok('the /webhook/:token path form is gone (404)', inboxPathToken.status === 404);
 
   console.log('\n[sse live stream]');
+  // A query-string access token is no longer accepted: it is long-lived and
+  // replayable, and stream URLs land in proxy logs, history and Referer headers.
+  const legacyStream = await fetch(`${BASE}/api/notifications/stream?token=${encodeURIComponent(token)}`, {
+    headers: { Accept: 'text/event-stream' }
+  });
+  ok('SSE refuses a query-string access token (401)', legacyStream.status === 401);
+  await closeStream(legacyStream);
+
+  const ticketRes = await api('POST', '/api/notifications/stream-ticket', { token });
+  ok(
+    'stream ticket minted over the header-authenticated path',
+    ticketRes.status === 200 &&
+      typeof ticketRes.json?.ticket === 'string' &&
+      ticketRes.json.ticket.length >= 40 &&
+      ticketRes.json?.expiresIn > 0
+  );
+  const ticket = ticketRes.json?.ticket ?? '';
+
   const streamCtrl = new AbortController();
-  const sseRes = await fetch(`${BASE}/api/notifications/stream?token=${encodeURIComponent(token)}`, {
+  const sseRes = await fetch(`${BASE}/api/notifications/stream?ticket=${encodeURIComponent(ticket)}`, {
     signal: streamCtrl.signal,
     headers: { Accept: 'text/event-stream' }
   });
@@ -308,8 +424,77 @@ const mainRefresh = reg.json.refreshToken;
   } else {
     streamCtrl.abort();
   }
-  const sseDenied = await fetch(`${BASE}/api/notifications/stream?token=forged.token.value`);
-  ok('SSE rejects forged token', sseDenied.status === 401);
+  await new Promise((r) => setTimeout(r, 100));
+
+  // Single use is the property that makes a ticket safe to put in a URL at all:
+  // one captured from an access log is already spent.
+  const replayed = await fetch(`${BASE}/api/notifications/stream?ticket=${encodeURIComponent(ticket)}`, {
+    headers: { Accept: 'text/event-stream' }
+  });
+  ok('a spent ticket cannot be replayed (401)', replayed.status === 401);
+  await closeStream(replayed);
+
+  const sseDenied = await fetch(`${BASE}/api/notifications/stream?ticket=forged-ticket-value`);
+  ok('SSE rejects a forged ticket', sseDenied.status === 401);
+  await closeStream(sseDenied);
+
+  // Non-browser clients keep the header path, which runs the full revocation check.
+  const sseHeaderPath = await fetch(`${BASE}/api/notifications/stream`, {
+    headers: { Authorization: `Bearer ${token}`, Accept: 'text/event-stream' }
+  });
+  ok(
+    'SSE also accepts an Authorization header for non-browser clients',
+    sseHeaderPath.status === 200 &&
+      (sseHeaderPath.headers.get('content-type') ?? '').includes('text/event-stream')
+  );
+  await closeStream(sseHeaderPath);
+
+  console.log('\n[google oauth start leg]');
+  const calStatus = await api('GET', '/api/calendar/status', { token });
+  ok(
+    'calendar status reports what is configured',
+    calStatus.status === 200 &&
+      typeof calStatus.json?.googleConfigured === 'boolean' &&
+      calStatus.json?.importExportEnabled === true
+  );
+
+  // The start leg is a POST that returns the consent URL. The redirecting GET it
+  // replaced could never work: it sits behind header auth, and the only thing
+  // that can follow a redirect to Google is a navigation, which sends no header.
+  const startGet = await fetch(`${BASE}/api/calendar/google/start`, {
+    headers: { Authorization: `Bearer ${token}` },
+    redirect: 'manual'
+  });
+  ok(
+    'GET on the start leg answers 405 with Allow: POST',
+    startGet.status === 405 && (startGet.headers.get('allow') ?? '').toUpperCase().includes('POST')
+  );
+
+  const startPost = await api('POST', '/api/calendar/google/start', { token });
+  if (calStatus.json?.googleConfigured) {
+    let startUrl = null;
+    try {
+      startUrl = new URL(startPost.json?.url ?? '');
+    } catch {
+      startUrl = null;
+    }
+    ok(
+      'start returns a Google consent URL carrying state',
+      startPost.status === 200 &&
+        startUrl?.origin === 'https://accounts.google.com' &&
+        startUrl.searchParams.get('response_type') === 'code' &&
+        startUrl.searchParams.get('access_type') === 'offline' &&
+        Boolean(startUrl.searchParams.get('state')) &&
+        startPost.json?.expiresIn > 0
+    );
+  } else {
+    ok(
+      'start reports 422 while Google is unconfigured',
+      startPost.status === 422 && startPost.json?.error?.code === 'VALIDATION_ERROR'
+    );
+  }
+  const startNoAuth = await fetch(`${BASE}/api/calendar/google/start`, { method: 'POST' });
+  ok('start leg requires authentication (401)', startNoAuth.status === 401);
 
   console.log('\n[account management]');
   const amEmail = `am_${Date.now()}@test.local`;
@@ -453,14 +638,25 @@ const mainRefresh = reg.json.refreshToken;
     body: { email: rlEmail, password: 'Passw0rd!42', displayName: 'Throttle Me' }
   });
   let saw429 = false;
+  let retryAfter = null;
+  let retryAfterDetail = null;
   for (let i = 0; i < 12; i += 1) {
     const attempt = await api('POST', '/api/auth/login', { body: { email: rlEmail, password: 'DefinitelyWrong1' } });
     if (attempt.status === 429) {
       saw429 = true;
+      retryAfter = attempt.headers.get('retry-after');
+      retryAfterDetail = attempt.json?.error?.details?.retryAfterSeconds ?? null;
       break;
     }
   }
   ok('repeated failed logins hit 429 rate limit', saw429);
+  // Without this the client guesses, and an early retry only spends more budget
+  // against a fixed window.
+  ok(
+    '429 carries Retry-After and repeats it in the error details',
+    Number(retryAfter) > 0 && Number(retryAfterDetail) === Number(retryAfter),
+    `header=${retryAfter} details=${retryAfterDetail}`
+  );
 
   console.log('\n[refresh token rotation + theft detection]');
   const rtEmail = `rt_${Date.now()}@test.local`;
@@ -498,6 +694,17 @@ const mainRefresh = reg.json.refreshToken;
       metricsRes.json?.requestsTotal > 0 &&
       typeof metricsRes.json?.uptimeSeconds === 'number' &&
       typeof metricsRes.json?.memoryMb === 'number'
+  );
+  // Counters reset on restart, so they cannot say what is stuck *now* — the live
+  // queue read is what an alert on a falling-behind worker has to watch.
+  ok(
+    'metrics includes a live outbox gauge and the engine counters',
+    typeof metricsRes.json?.outbox?.pending === 'number' &&
+      typeof metricsRes.json?.outbox?.claimable === 'number' &&
+      typeof metricsRes.json?.outbox?.oldestClaimableAgeSeconds !== 'undefined' &&
+      typeof metricsRes.json?.outboxDeadLettered === 'number' &&
+      typeof metricsRes.json?.engineTicksCoalesced === 'number' &&
+      typeof metricsRes.json?.unhandledErrors === 'number'
   );
 
   console.log('\n[cleanup + ownership]');

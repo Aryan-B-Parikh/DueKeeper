@@ -4,11 +4,8 @@ import { config } from './config/env';
 import { requestContext } from './middleware/requestContext';
 import { notFoundHandler, errorHandler } from './middleware/errorHandler';
 import { metrics, snapshotMetrics } from './lib/metrics';
+import { outboxQueueDepth } from './engine/outbox';
 import { requireAuth } from './middleware/auth';
-
-function requireAuthHandler() {
-  return requireAuth();
-}
 import { healthRouter } from './health/health.routes';
 import { authRouter } from './modules/auth/auth.routes';
 import { usersRouter } from './modules/users/users.routes';
@@ -22,6 +19,21 @@ export function createApp(): Express {
   const app = express();
   app.disable('x-powered-by');
   app.set('trust proxy', 1);
+  // The single place security headers are set. This server only ever answers
+  // with JSON, an .ics download or a redirect, so the CSP can be the strictest
+  // one available — `'self'` would only be needed if it served its own HTML.
+  app.use((_req: Request, res: Response, next: NextFunction) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    res.setHeader('X-DNS-Prefetch-Control', 'off');
+    res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+    res.setHeader('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'; base-uri 'none'");
+    if (config.isProd) {
+      res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    }
+    next();
+  });
 
   app.use(requestContext());
 
@@ -55,15 +67,20 @@ export function createApp(): Express {
 
   app.use('/api/auth', authRouter);
   app.use('/api/user', usersRouter);
-  app.use('/api/events', eventsRouter);
+  // The more specific prefix has to be mounted first: eventsRouter's `GET /:id`
+  // otherwise matches `/api/events/extract` and answers 404 before this router
+  // is ever consulted.
   app.use('/api/events/extract', extractRouter);
+  app.use('/api/events', eventsRouter);
   app.use('/api/notifications', notificationsRouter);
   app.use('/api/calendar', calendarRouter);
   app.use('/api/inbox', inboxRouter);
   app.use('/api/health', healthRouter);
 
   app.get('/api/metrics', requireAuth(), (_req, res) => {
-    res.json(snapshotMetrics());
+    // Counters plus a live queue read: the counters reset on restart, so on their
+    // own they cannot tell you how much is stuck right now.
+    res.json({ ...snapshotMetrics(), outbox: outboxQueueDepth() });
   });
 
   app.use(notFoundHandler);

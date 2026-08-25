@@ -1,4 +1,10 @@
-import { addDays, zonedToUtcIso } from './dateUtils';
+import {
+  addCivilDays,
+  civilDateInZone,
+  isValidCivilDate,
+  zonedToUtcIso,
+  type CivilDate
+} from './dateUtils';
 
 const MONTHS: Record<string, number> = {
   jan: 0, january: 0,
@@ -67,23 +73,32 @@ interface DateResolution {
   explicitTime: boolean;
 }
 
-function rollYear(currentYear: number, month: number, day: number): number {
-  const candidate = new Date(currentYear, month, day, 23, 59);
-  return candidate.getTime() < Date.now() ? currentYear + 1 : currentYear;
+function isValidCalendarDate(year: number, monthIndex: number, day: number): boolean {
+  return isValidCivilDate(year, monthIndex, day);
 }
 
-function resolveDate(segment: string, today: Date): DateResolution | null {
+/**
+ * A bare "March 14" with no year means the next March 14. Deciding that needs
+ * the user's calendar: near midnight and near New Year, the server's date and
+ * the user's date differ, and picking the wrong one rolls the deadline a full
+ * year off.
+ */
+function rollYear(today: CivilDate, month: number, day: number): number {
+  if (month < today.month) return today.year + 1;
+  if (month > today.month) return today.year;
+  return day < today.day ? today.year + 1 : today.year;
+}
+
+function resolveDate(segment: string, today: CivilDate): DateResolution | null {
   const time = parseTimeOfDay(segment);
 
   const iso = /\b(\d{4})-(\d{2})-(\d{2})\b/.exec(segment);
   if (iso) {
-    return {
-      year: Number(iso[1]),
-      month: Number(iso[2]) - 1,
-      day: Number(iso[3]),
-      explicitYear: true,
-      explicitTime: Boolean(time)
-    };
+    const y = Number(iso[1]);
+    const m = Number(iso[2]) - 1;
+    const d = Number(iso[3]);
+    if (!isValidCalendarDate(y, m, d)) return null;
+    return { year: y, month: m, day: d, explicitYear: true, explicitTime: Boolean(time) };
   }
 
   const monthName =
@@ -94,9 +109,8 @@ function resolveDate(segment: string, today: Date): DateResolution | null {
     const month = MONTHS[monthName[1].toLowerCase()];
     const day = Number(monthName[2]);
     if (month === undefined || day < 1 || day > 31) return null;
-    const year = monthName[3]
-      ? Number(monthName[3])
-      : rollYear(today.getFullYear(), month, day);
+    const year = monthName[3] ? Number(monthName[3]) : rollYear(today, month, day);
+    if (!isValidCalendarDate(year, month, day)) return null;
     return { year, month, day, explicitYear: Boolean(monthName[3]), explicitTime: Boolean(time) };
   }
 
@@ -119,22 +133,18 @@ function resolveDate(segment: string, today: Date): DateResolution | null {
       month = b;
     }
     if (month < 1 || month > 12 || day < 1 || day > 31) return null;
-    return {
-      year: year ?? rollYear(today.getFullYear(), month - 1, day),
-      month: month - 1,
-      day,
-      explicitYear: Boolean(numeric[3]),
-      explicitTime: Boolean(time)
-    };
+    const y = year ?? rollYear(today, month - 1, day);
+    if (!isValidCalendarDate(y, month - 1, day)) return null;
+    return { year: y, month: month - 1, day, explicitYear: Boolean(numeric[3]), explicitTime: Boolean(time) };
   }
 
   const lowered = segment.toLowerCase();
   const inDays = /\bin\s+(\d{1,3})\s+(days?|weeks?)\b/.exec(lowered);
-  let target: Date | null = null;
+  let target: CivilDate | null = null;
   if (inDays) {
-    target = addDays(today, Number(inDays[1]) * (inDays[2].startsWith('week') ? 7 : 1));
+    target = addCivilDays(today, Number(inDays[1]) * (inDays[2].startsWith('week') ? 7 : 1));
   } else if (/\b(tomorrow|tmrw|tmr)\b/.test(lowered)) {
-    target = addDays(today, 1);
+    target = addCivilDays(today, 1);
   } else if (/\b(today|tonight)\b/.test(lowered)) {
     target = today;
   } else {
@@ -144,17 +154,17 @@ function resolveDate(segment: string, today: Date): DateResolution | null {
       );
     if (weekday) {
       const dow = WEEKDAYS[weekday[2].toLowerCase()];
-      let delta = (dow - today.getDay() + 7) % 7;
+      let delta = (dow - today.weekday + 7) % 7;
       if (delta === 0) delta = 7;
       if (/^next/i.test(weekday[1] ?? '') && delta <= 2) delta += 7;
-      target = addDays(today, delta);
+      target = addCivilDays(today, delta);
     }
   }
   if (target) {
     return {
-      year: target.getFullYear(),
-      month: target.getMonth(),
-      day: target.getDate(),
+      year: target.year,
+      month: target.month,
+      day: target.day,
       explicitYear: false,
       explicitTime: Boolean(time)
     };
@@ -191,7 +201,7 @@ export function inferEventType(segment: string): HeuristicCandidate['eventType']
   return 'other';
 }
 
-function toCandidate(segment: string, today: Date, timezone: string): HeuristicCandidate | null {
+function toCandidate(segment: string, today: CivilDate, timezone: string): HeuristicCandidate | null {
   if (!KEYWORD_RE.test(segment)) return null;
   const resolution = resolveDate(segment, today);
   if (!resolution) return null;
@@ -229,12 +239,21 @@ function capitalize(input: string): string {
   return input.charAt(0).toUpperCase() + input.slice(1);
 }
 
+const MAX_TEXT_CHARS = 20_000;
+const MAX_SEGMENTS = 2_000;
+const MAX_CANDIDATES = 20;
+
 export function extractHeuristicCandidates(text: string, timezone: string): HeuristicCandidate[] {
-  const today = new Date();
+  const today = civilDateInZone(timezone);
+  // Bounded here rather than trusting the caller: the HTTP route caps its input,
+  // but the inbox webhook feeds this whole forwarded emails, and every segment
+  // runs a dozen regexes on the synchronous request path.
   const segments = text
+    .slice(0, MAX_TEXT_CHARS)
     .split(/\r?\n|(?<=[.;!?])\s+|\s+[·•|]\s+/)
     .map((s) => s.trim())
-    .filter((s) => s.length >= 8);
+    .filter((s) => s.length >= 8)
+    .slice(0, MAX_SEGMENTS);
 
   const seen = new Set<string>();
   const candidates: HeuristicCandidate[] = [];
@@ -245,7 +264,7 @@ export function extractHeuristicCandidates(text: string, timezone: string): Heur
     if (seen.has(dedupeKey)) continue;
     seen.add(dedupeKey);
     candidates.push(candidate);
-    if (candidates.length >= 20) break;
+    if (candidates.length >= MAX_CANDIDATES) break;
   }
   return candidates.sort((a, b) => b.confidence - a.confidence);
 }

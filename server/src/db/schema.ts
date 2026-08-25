@@ -1,6 +1,13 @@
 export interface Migration {
   id: string;
   sql: string;
+  /**
+   * Set for migrations that rebuild a table other tables reference. SQLite
+   * cannot drop a column-level UNIQUE constraint in place, so the table must be
+   * recreated — and `PRAGMA foreign_keys` can only be changed outside a
+   * transaction, so the runner has to handle it rather than the SQL.
+   */
+  rebuildsReferencedTable?: boolean;
 }
 
 export const migrations: Migration[] = [
@@ -177,6 +184,51 @@ CREATE TABLE IF NOT EXISTS expo_push_tokens (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_expo_tokens_user ON expo_push_tokens(user_id);
+`
+  },
+  {
+    id: '006_delivery_rescheduling_and_reclaims',
+    rebuildsReferencedTable: true,
+    sql: `
+-- reminder_deliveries.reminder_id was UNIQUE, which capped every reminder at
+-- exactly one delivery for all time. Cancelling a delivery (snooze, edit,
+-- reopen) therefore permanently silenced that reminder: the replanning INSERT
+-- OR IGNORE always collided with the cancelled row and was skipped. Key the
+-- uniqueness on the fire time instead, so rescheduling materializes a new row
+-- while still de-duplicating repeated planner ticks.
+CREATE TABLE reminder_deliveries_rebuild (
+  id TEXT PRIMARY KEY,
+  reminder_id TEXT NOT NULL REFERENCES reminders(id) ON DELETE CASCADE,
+  event_id TEXT NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  scheduled_for TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','sent','failed','cancelled')),
+  sent_at TEXT,
+  created_at TEXT NOT NULL,
+  UNIQUE (reminder_id, scheduled_for)
+);
+
+INSERT INTO reminder_deliveries_rebuild
+  (id, reminder_id, event_id, user_id, scheduled_for, status, sent_at, created_at)
+SELECT id, reminder_id, event_id, user_id, scheduled_for, status, sent_at, created_at
+FROM reminder_deliveries;
+
+DROP TABLE reminder_deliveries;
+ALTER TABLE reminder_deliveries_rebuild RENAME TO reminder_deliveries;
+
+CREATE INDEX IF NOT EXISTS idx_deliveries_window ON reminder_deliveries(status, scheduled_for);
+CREATE INDEX IF NOT EXISTS idx_deliveries_user_pending ON reminder_deliveries(user_id, status);
+CREATE INDEX IF NOT EXISTS idx_deliveries_event ON reminder_deliveries(event_id, status);
+CREATE INDEX IF NOT EXISTS idx_deliveries_reminder ON reminder_deliveries(reminder_id, status);
+
+-- A lease that expires because the worker died is not a failed delivery
+-- attempt, so reclaiming refunds the attempt. Counting reclaims separately
+-- keeps that refund from turning a crash-looping job into an infinite retry.
+ALTER TABLE notification_outbox ADD COLUMN reclaims INTEGER NOT NULL DEFAULT 0;
+
+-- Claim ordering is COALESCE(next_retry_at, scheduled_at); this index matches it.
+CREATE INDEX IF NOT EXISTS idx_outbox_ready
+  ON notification_outbox(status, next_retry_at, scheduled_at);
 `
   }
 ];

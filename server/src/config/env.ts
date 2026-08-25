@@ -63,6 +63,19 @@ export interface AppConfig {
   outboxLeaseSeconds: number;
   outboxClaimLimit: number;
   outboxMaxAttempts: number;
+  outboxMaxReclaims: number;
+  outboxConcurrency: number;
+  plannerGraceSeconds: number;
+  plannerBatchLimit: number;
+  reconcileBatchLimit: number;
+  outboundFetchTimeoutMs: number;
+  smtpTimeoutMs: number;
+  encryptionKey?: string;
+  previousEncryptionKeys: string[];
+  sseMaxConnectionsPerUser: number;
+  rateLimitMaxKeys: number;
+  pushSubscriptionsPerUser: number;
+  maxListPageSize: number;
 }
 
 function str(name: string, fallback: string): string {
@@ -80,6 +93,42 @@ function num(name: string, fallback: number): number {
   if (v === undefined || v.trim() === '') return fallback;
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
+}
+
+/** Integer in [min, max]; out-of-range or non-integer input falls back rather
+ * than silently configuring, say, a zero-second lease or an unbounded batch. */
+function intInRange(name: string, fallback: number, min: number, max: number): number {
+  const n = num(name, fallback);
+  if (!Number.isInteger(n) || n < min || n > max) {
+    if (process.env[name] !== undefined && process.env[name]?.trim() !== '') {
+      log.warn(`${name}="${process.env[name]}" is not an integer in [${min}, ${max}]; using ${fallback}`);
+    }
+    return fallback;
+  }
+  return n;
+}
+
+function list(name: string): string[] {
+  return str(name, '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+/**
+ * Checks that a value really is a base64-encoded 32-byte key.
+ *
+ * `Buffer.from(x, 'base64')` never throws — it silently drops every character
+ * outside the alphabet — so decoding alone cannot tell a good key from a mangled
+ * paste. The charset test is what actually catches the accident; the length test
+ * then catches truncation. Both alphabets are accepted because `base64url` is
+ * what most key-generation snippets emit.
+ */
+function base64KeyProblem(value: string): string | null {
+  const trimmed = value.trim();
+  if (!/^[A-Za-z0-9+/_-]+={0,2}$/.test(trimmed)) return 'is not valid base64';
+  if (Buffer.from(trimmed, 'base64').length !== 32) return 'must decode to exactly 32 bytes';
+  return null;
 }
 
 export const config: AppConfig = {
@@ -112,9 +161,22 @@ export const config: AppConfig = {
   googleRedirectUri: optional('GOOGLE_REDIRECT_URI'),
   vapidPublicKey: optional('VAPID_PUBLIC_KEY'),
   vapidPrivateKey: optional('VAPID_PRIVATE_KEY'),
-  outboxLeaseSeconds: num('OUTBOX_LEASE_SECONDS', 120),
-  outboxClaimLimit: num('OUTBOX_CLAIM_LIMIT', 50),
-  outboxMaxAttempts: num('OUTBOX_MAX_ATTEMPTS', 3)
+  outboxLeaseSeconds: intInRange('OUTBOX_LEASE_SECONDS', 120, 10, 3600),
+  outboxClaimLimit: intInRange('OUTBOX_CLAIM_LIMIT', 50, 1, 500),
+  outboxMaxAttempts: intInRange('OUTBOX_MAX_ATTEMPTS', 3, 1, 10),
+  outboxMaxReclaims: intInRange('OUTBOX_MAX_RECLAIMS', 3, 0, 20),
+  outboxConcurrency: intInRange('OUTBOX_CONCURRENCY', 5, 1, 20),
+  plannerGraceSeconds: intInRange('PLANNER_GRACE_SECONDS', 60, 0, 3600),
+  plannerBatchLimit: intInRange('PLANNER_BATCH_LIMIT', 500, 10, 5000),
+  reconcileBatchLimit: intInRange('RECONCILE_BATCH_LIMIT', 100, 10, 1000),
+  outboundFetchTimeoutMs: intInRange('OUTBOUND_FETCH_TIMEOUT_MS', 10000, 1000, 120000),
+  smtpTimeoutMs: intInRange('SMTP_TIMEOUT_MS', 10000, 1000, 120000),
+  encryptionKey: optional('ENCRYPTION_KEY'),
+  previousEncryptionKeys: list('PREVIOUS_ENCRYPTION_KEYS'),
+  sseMaxConnectionsPerUser: intInRange('SSE_MAX_CONNECTIONS_PER_USER', 5, 1, 100),
+  rateLimitMaxKeys: intInRange('RATE_LIMIT_MAX_KEYS', 10000, 100, 1000000),
+  pushSubscriptionsPerUser: intInRange('PUSH_SUBSCRIPTIONS_PER_USER', 20, 1, 100),
+  maxListPageSize: intInRange('MAX_LIST_PAGE_SIZE', 100, 10, 1000)
 };
 
 if (!config.isProd) {
@@ -128,9 +190,23 @@ if (!config.isProd) {
   if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32) {
     problems.push('JWT_SECRET must be set to at least 32 characters');
   }
-  if (!process.env.ENCRYPTION_KEY) {
+  if (!config.encryptionKey) {
     problems.push('ENCRYPTION_KEY must be set (base64-encoded 32 bytes)');
+  } else {
+    const problem = base64KeyProblem(config.encryptionKey);
+    if (problem) problems.push(`ENCRYPTION_KEY ${problem}`);
   }
+  config.previousEncryptionKeys.forEach((key, index) => {
+    const problem = base64KeyProblem(key);
+    if (problem) {
+      // A malformed entry here is worse than a missing one. The operator believes
+      // rotation is covered; the key is quietly discarded instead, and every row
+      // still encrypted under it fails to decrypt at the moment it is needed —
+      // which for a Google connection means sync breaking with no way back but a
+      // reconnect. Refuse to start rather than discover it during an outage.
+      problems.push(`PREVIOUS_ENCRYPTION_KEYS[${index}] ${problem}`);
+    }
+  });
   if (config.appBaseUrl.startsWith('http://')) {
     if (allowLocalE2E) {
       log.warn('ALLOW_LOCALHOST_E2E=1 — permitting non-HTTPS APP_BASE_URL for local end-to-end testing ONLY');
@@ -144,6 +220,15 @@ if (!config.isProd) {
     } else {
       problems.push('CORS_ALLOWED_ORIGINS must not contain localhost in production');
     }
+  }
+  if (!config.smtpHost) {
+    // Without this the outbox silently "delivers" every reminder email to the
+    // server console and marks the job sent — a total, invisible loss of the
+    // product's core function in production.
+    problems.push('SMTP_HOST must be set in production (email delivery would otherwise be dropped)');
+  }
+  if (config.jwtSecret && config.encryptionKey && config.jwtSecret === config.encryptionKey) {
+    problems.push('ENCRYPTION_KEY must differ from JWT_SECRET (key separation)');
   }
   if (problems.length > 0) {
     log.error('Refusing to start with unsafe production configuration');

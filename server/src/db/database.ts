@@ -24,9 +24,56 @@ export function exec(sql: string): void {
   getDb().exec(sql);
 }
 
+/** Typed helper — removes the `as unknown as T[]` ceremony at call sites. */
+export function queryAll<T>(sql: string, ...params: unknown[]): T[] {
+  // DatabaseSync's StatementSync is typed as unknown[] → widen to any for ergonomics
+  return (prepare(sql).all as (...p: unknown[]) => unknown[])(...params) as T[];
+}
+
+export function queryOne<T>(sql: string, ...params: unknown[]): T | undefined {
+  return (prepare(sql).get as (...p: unknown[]) => unknown)(...params) as T | undefined;
+}
+
+let txDepth = 0;
+let savepointSeq = 0;
+
+/**
+ * Runs `fn` inside a write transaction. Re-entrant: nesting uses SAVEPOINTs, so
+ * a transactional helper can safely call another one. SQLite rejects a plain
+ * `BEGIN` inside an open transaction, and without this a composed helper would
+ * throw "cannot start a transaction within a transaction" — which callers then
+ * tend to "fix" by dropping the transaction entirely.
+ *
+ * `fn` must be synchronous. `node:sqlite` is synchronous and a transaction is
+ * connection-wide, so awaiting inside one would let unrelated work join it.
+ */
 export function inTransaction<T>(fn: () => T): T {
   const db = getDb();
+
+  if (txDepth > 0) {
+    savepointSeq += 1;
+    const name = `sp_${savepointSeq}`;
+    db.exec(`SAVEPOINT ${name}`);
+    txDepth += 1;
+    try {
+      const result = fn();
+      db.exec(`RELEASE ${name}`);
+      return result;
+    } catch (err) {
+      try {
+        db.exec(`ROLLBACK TO ${name}`);
+        db.exec(`RELEASE ${name}`);
+      } catch {
+        /* rollback after failure is best-effort */
+      }
+      throw err;
+    } finally {
+      txDepth -= 1;
+    }
+  }
+
   db.exec('BEGIN IMMEDIATE');
+  txDepth = 1;
   try {
     const result = fn();
     db.exec('COMMIT');
@@ -38,7 +85,13 @@ export function inTransaction<T>(fn: () => T): T {
       /* rollback after failure is best-effort */
     }
     throw err;
+  } finally {
+    txDepth = 0;
   }
+}
+
+export function inTransactionDepth(): number {
+  return txDepth;
 }
 
 export function closeDb(): void {
@@ -46,4 +99,6 @@ export function closeDb(): void {
     instance.close();
     instance = null;
   }
+  txDepth = 0;
+  savepointSeq = 0;
 }

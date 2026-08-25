@@ -25,6 +25,10 @@ function countUnread(userId: string): number {
   return Number(row.c);
 }
 
+export function countSubscriptions(userId: string): number {
+  return listeners.get(userId)?.size ?? 0;
+}
+
 export function subscribe(userId: string, listener: Listener): Listener {
   let set = listeners.get(userId);
   if (!set) {

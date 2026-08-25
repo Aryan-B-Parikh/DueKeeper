@@ -17,7 +17,8 @@
               calendar connections,
               external_events, oauth_states
                      ▲
-   SendGrid Inbound Parse / any MTA webhook ──▶ POST /api/inbox/webhook/:token
+   SendGrid Inbound Parse / any MTA webhook ──▶ POST /api/inbox/webhook
+                                               (secret in X-Inbox-Token header)
 ```
 
 ## Request flow & security
@@ -33,9 +34,11 @@
 
 The engine publishes through an in-process hub (`engine/hub.ts`). When the in-app channel inserts a notification it also calls `publishNotification`, which fans out to every subscribed stream for that user:
 
-- `GET /api/notifications/stream?token=<jwt>` upgrades to `text/event-stream` (token via query param because EventSource cannot set headers).
+- `GET /api/notifications/stream?ticket=<ticket>` upgrades to `text/event-stream`. Something has to travel in the URL because EventSource cannot set headers, so the client first spends an authenticated `POST /api/notifications/stream-ticket` to mint a single-use 30-second ticket (`lib/streamTicket.ts`) rather than putting its access token there. Header auth is still accepted for non-browser clients.
 - On connect the client immediately receives the current unread count; afterwards each new in-app notification and unread-count change is pushed as a named event.
 - Heartbeat comments every 25s keep intermediaries from closing idle connections; disconnect cleanup removes listeners. A slow polling fallback in the UI covers reconnect gaps.
+- `res.write` backpressure closes a stream the client is not draining, and each user is capped at `SSE_MAX_CONNECTIONS_PER_USER` concurrent streams.
+- Shutdown ends every open stream (`closeNotificationStreams`) after emitting a `shutdown` event — an event stream never completes on its own, so `server.close()` would otherwise wait on it until the hard-kill timer fired.
 - Account deletion closes nothing explicitly — streams fail closed on their next DB touch because the user row is gone.
 
 ## The reminder engine (at-least-once delivery)
@@ -80,11 +83,13 @@ Single-process deployment; `BEGIN IMMEDIATE` gives the same writer serialization
 
 - `.ics` import unfolds RFC5545 lines, parses `DTSTART` (UTC `Z`, local-with-`TZID`, date-only), dedupes by `(user, 'ics', UID)` via `external_events`.
 - Export generates folded, escaped VCALENDAR for all non-cancelled events.
-- Google sync (optional): single-use 10-minute OAuth `state` row consumed atomically in the callback; refresh/access tokens stored AES-256-GCM encrypted (`secretbox`); incremental `syncToken`; HTTP 410 triggers automatic full resync; only keyword-matching events (exam/due/submit/hackathon…) are imported, identity-mapped by `(user, 'google', eventId)`.
+- Google sync (optional): the browser never navigates to an authenticated route — `POST /api/calendar/google/start` mints a single-use 10-minute `state` row and returns the consent URL for the client to navigate to, because the redirecting `GET` it replaced sat behind `requireAuth` and a top-level navigation carries no `Authorization` header, so consent was unreachable. The callback is public by necessity and validates, binds and consumes `state` **before** exchanging the code; refresh/access tokens stored AES-256-GCM encrypted (`secretbox`); incremental `syncToken`; HTTP 410 triggers automatic full resync; only keyword-matching events (exam/due/submit/hackathon…) are imported, identity-mapped by `(user, 'google', eventId)`.
 
 ## Inbox forwarding
 
-`POST /api/inbox/webhook/:token` — enabled only when `INBOX_WEBHOOK_TOKEN` is set (otherwise 404). Token compared via SHA-256 + `timingSafeEqual`. Recipient resolution prefers the `deadline+<forwarding_token>@domain` local-part; sender email is only used after the token gate passes. Auto-saves high-confidence deadlines, always notifies in-app, emails a receipt.
+`POST /api/inbox/webhook` — enabled only when `INBOX_WEBHOOK_TOKEN` is set (otherwise 404). The secret is read from the `X-Inbox-Token` header (or `X-Webhook-Token`, or `Authorization: Bearer`) and compared in constant time; the old `/webhook/:token` and `?token=` forms were removed because a secret in a URL is captured by access logs, proxies, browser history and `Referer` by default. Attempts are capped at 120/minute per source address, since a single shared secret on an unauthenticated endpoint is otherwise brute-forceable at line rate.
+
+Recipient resolution reads the `to` address **only**, anchored on `deadline+<forwarding_token>@domain`. The `from` fallback was deleted: it is an unauthenticated request field and a trivially spoofable SMTP header, so anyone able to reach the endpoint could write auto-saved events into any account by setting it. Extraction runs in the recipient's own timezone — doing it in UTC shifted every relative and time-of-day match by their offset, which for anyone far from UTC moved the deadline a whole day. Auto-saves candidates at ≥0.7 confidence (max 5 per message), always notifies in-app, emails a receipt. Logged recipient addresses are redacted, because the local part contains the forwarding token that grants write access to the account.
 
 ## Data integrity rules
 

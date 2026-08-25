@@ -23,6 +23,10 @@ export interface ResolvedEvent {
   timezone: string;
 }
 
+/**
+ * In-app delivery — enforces `idempotencyKey: reminder:<deliveryId>` so
+ * worker retries (lease reclaim, crash) cannot create duplicate notification rows.
+ */
 export async function deliverInApp(payload: OutboxPayload, event: ResolvedEvent): Promise<void> {
   const { notifyEverywhere } = await import('../notifier');
   notifyEverywhere(
@@ -49,6 +53,9 @@ export async function deliverEmail(
   await sendRaw({
     to: recipientEmail,
     subject: `DueKeeper reminder: ${event.title}`,
+    // Deterministic key so a retried send is deduplicated by the provider
+    // rather than delivered twice.
+    idempotencyKey: `reminder-${payload.deliveryId}`,
     text: [
       `Reminder: "${event.title}"`,
       ``,

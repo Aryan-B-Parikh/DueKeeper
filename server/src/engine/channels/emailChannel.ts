@@ -8,6 +8,13 @@ export interface RawMail {
   to: string;
   subject: string;
   text: string;
+  /**
+   * Stable, per-delivery identifier. A retry after a timeout may be re-sending
+   * mail the MTA already accepted; carrying the same Message-ID and
+   * X-Entity-Ref-ID lets the provider collapse the duplicate instead of the
+   * user getting the same reminder two or three times.
+   */
+  idempotencyKey?: string;
 }
 
 export interface EmailService {
@@ -34,16 +41,23 @@ class SmtpEmailService implements EmailService {
       host: config.smtpHost,
       port: config.smtpPort,
       secure: config.smtpPort === 465,
-      auth: config.smtpUser ? { user: config.smtpUser, pass: config.smtpPass ?? '' } : undefined
+      auth: config.smtpUser ? { user: config.smtpUser, pass: config.smtpPass ?? '' } : undefined,
+      connectionTimeout: config.smtpTimeoutMs,
+      greetingTimeout: config.smtpTimeoutMs,
+      socketTimeout: config.smtpTimeoutMs
     });
   }
 
   async sendRaw(mail: RawMail): Promise<void> {
+    const domain = config.emailFrom.match(/@([^>\s]+)/)?.[1] ?? 'duekeeper.local';
+    const messageId = mail.idempotencyKey ? `<${mail.idempotencyKey}@${domain}>` : undefined;
     await this.transporter.sendMail({
       from: config.emailFrom,
       to: mail.to,
       subject: mail.subject,
-      text: mail.text
+      text: mail.text,
+      messageId,
+      headers: mail.idempotencyKey ? { 'X-Entity-Ref-ID': mail.idempotencyKey } : undefined
     });
   }
 }
@@ -53,7 +67,12 @@ function resolveEmailService(): EmailService {
     log.info(`SMTP email delivery enabled via ${config.smtpHost}:${config.smtpPort}`);
     return new SmtpEmailService();
   }
-  log.info('SMTP not configured; emails will be logged to console (dev mode)');
+  if (config.isProd) {
+    // Silent degradation to console in production masks the outage and the
+    // outbox then marks the job 'sent' — fail loudly so deployment catches it.
+    throw new Error('SMTP_HOST is required in production; refusing to start with console email fallback');
+  }
+  log.warn('SMTP not configured; emails will be logged to console (dev mode)');
   return new ConsoleEmailService();
 }
 

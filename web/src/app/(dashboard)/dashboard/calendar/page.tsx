@@ -85,6 +85,17 @@ export default function CalendarPage() {
     }
   }
 
+  async function exportIcs() {
+    setBusy(true);
+    try {
+      await calendarApi.downloadIcs();
+    } catch (err) {
+      toast('error', err instanceof Error ? err.message : 'Export failed');
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const selectedEvents = selectedDay ? byDay.get(selectedDay) ?? [] : [];
 
   return (
@@ -95,9 +106,9 @@ export default function CalendarPage() {
           <p className="text-sm text-ink-soft">Deadlines laid out across the month ({timezone}).</p>
         </div>
         <div className="flex gap-2">
-          <a href={calendarApi.exportUrl()} className="btn-ghost" download="duekeeper.ics">
+          <button onClick={() => void exportIcs()} disabled={busy} className="btn-ghost">
             <Download className="h-4 w-4" /> Export .ics
-          </a>
+          </button>
           <label className="btn-ghost cursor-pointer">
             <Upload className="h-4 w-4" /> Import .ics
             <input

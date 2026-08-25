@@ -1,5 +1,6 @@
 import { prepare } from '../db/database';
 import { createLogger } from '../lib/logger';
+import { config } from '../config/env';
 
 const log = createLogger('expo-push');
 
@@ -25,19 +26,23 @@ export async function sendExpoToUser(userId: string, input: ExpoPushInput): Prom
     data: { url: input.url ?? '/dashboard/notifications' }
   }));
 
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), config.outboundFetchTimeoutMs);
   try {
     const response = await fetch(EXPO_PUSH_ENDPOINT, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Accept: 'application/json'
-      },
-      body: JSON.stringify(messages)
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify(messages),
+      signal: controller.signal
     });
     if (!response.ok) {
       log.warn(`Expo push API returned ${response.status}`);
       return { sent: 0, removed: 0 };
     }
+    // The body read stays inside the timeout window: a server that sends headers
+    // and then stalls mid-body would otherwise hang here indefinitely, because
+    // clearing the timer immediately after fetch() resolves leaves the read
+    // unprotected.
     const payload = (await response.json()) as {
       data?: Array<{ status?: string; error?: string }>;
     };
@@ -59,5 +64,7 @@ export async function sendExpoToUser(userId: string, input: ExpoPushInput): Prom
   } catch (err) {
     log.warn('Expo push delivery failed', err as Error);
     return { sent: 0, removed: 0 };
+  } finally {
+    clearTimeout(timeout);
   }
 }
