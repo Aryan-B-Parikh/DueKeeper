@@ -74,38 +74,41 @@ export function EventCard({ event, onChanged }: EventCardProps) {
       </div>
 
       {!terminal && (
-        <div className="flex flex-wrap items-center gap-2 border-t border-line/60 pt-3">
+        <div className="flex flex-wrap items-center gap-2 border-t border-line/60 pt-3" role="group" aria-label={`Actions for ${event.title}`}>
           <button
             disabled={busy}
             onClick={() => run(() => eventsApi.markDone(event.id))}
-            className="btn-ghost !py-1.5 text-xs"
+            className="btn-ghost min-h-[44px] !py-2 text-xs sm:!py-1.5"
+            aria-label={`Mark ${event.title} as done`}
           >
-            <Check className="h-3.5 w-3.5" /> Done
+            <Check className="h-3.5 w-3.5" aria-hidden /> Done
           </button>
           <button
             disabled={busy}
             onClick={() => run(() => eventsApi.snooze(event.id, '1d'))}
-            className="btn-ghost !py-1.5 text-xs"
+            className="btn-ghost min-h-[44px] !py-2 text-xs sm:!py-1.5"
+            aria-label={`Snooze ${event.title} for 1 day`}
           >
-            <Clock3 className="h-3.5 w-3.5" /> Snooze 1d
+            <Clock3 className="h-3.5 w-3.5" aria-hidden /> Snooze 1d
           </button>
-          <Link href={`/dashboard/events/${event.id}/edit`} className="btn-ghost !py-1.5 text-xs">
-            <PencilLine className="h-3.5 w-3.5" /> Edit
+          <Link href={`/dashboard/events/${event.id}/edit`} className="btn-ghost min-h-[44px] !py-2 text-xs sm:!py-1.5" aria-label={`Edit ${event.title}`}>
+            <PencilLine className="h-3.5 w-3.5" aria-hidden /> Edit
           </Link>
           <button
             disabled={busy}
             onClick={() => run(() => eventsApi.cancel(event.id))}
-            className="btn-ghost !py-1.5 text-xs"
+            className="btn-ghost min-h-[44px] !py-2 text-xs sm:!py-1.5"
+            aria-label={`Cancel ${event.title}`}
           >
             Cancel
           </button>
           <button
             disabled={busy}
             onClick={() => run(() => eventsApi.remove(event.id))}
-            className="ml-auto rounded-lg p-1.5 text-ink-soft transition hover:bg-danger/10 hover:text-danger"
+            className="ml-auto min-h-[44px] min-w-[44px] rounded-lg p-2.5 text-ink-soft transition hover:bg-danger/10 hover:text-danger sm:p-1.5"
             aria-label={`Delete ${event.title}`}
           >
-            <Trash2 className="h-4 w-4" />
+            <Trash2 className="h-4 w-4" aria-hidden />
           </button>
         </div>
       )}
@@ -115,7 +118,7 @@ export function EventCard({ event, onChanged }: EventCardProps) {
           <button
             disabled={busy}
             onClick={() => run(() => eventsApi.remove(event.id))}
-            className="rounded-lg p-1.5 text-ink-soft transition hover:bg-danger/10 hover:text-danger"
+            className="min-h-[44px] min-w-[44px] rounded-lg p-2.5 text-ink-soft transition hover:bg-danger/10 hover:text-danger sm:p-1.5"
             aria-label={`Delete ${event.title}`}
           >
             <Trash2 className="h-4 w-4" />

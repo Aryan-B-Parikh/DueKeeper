@@ -96,15 +96,18 @@ export default function OverviewPage() {
         <StatCard label="Shown" value={visibleEvents.length} tone="muted" />
       </div>
 
-      <div className="flex gap-2 overflow-x-auto pb-1">
+      <div className="flex gap-2 overflow-x-auto pb-1" role="tablist" aria-label="Deadline filters">
         {FILTERS.map(({ key, label }) => (
           <button
             key={key}
+            role="tab"
+            aria-selected={filter === key}
+            aria-label={`Show ${label} deadlines`}
             onClick={() => setFilter(key)}
             className={
               filter === key
-                ? 'rounded-xl bg-accent-soft px-4 py-2 text-sm font-semibold text-accent shadow-neu-inset'
-                : 'rounded-xl bg-surface px-4 py-2 text-sm font-medium text-ink-soft shadow-neu-sm transition hover:text-ink'
+                ? 'rounded-xl bg-accent-soft px-4 py-2 text-sm font-semibold text-accent shadow-neu-inset min-h-[44px]'
+                : 'rounded-xl bg-surface px-4 py-2 text-sm font-medium text-ink-soft shadow-neu-sm transition hover:text-ink min-h-[44px]'
             }
           >
             {label}
@@ -113,16 +116,17 @@ export default function OverviewPage() {
       </div>
 
       {loading ? (
-        <div className="space-y-3">
+        <div className="space-y-3" role="status" aria-busy="true" aria-label="Loading deadlines">
           {[0, 1, 2].map((i) => (
-            <div key={i} className="neu-card h-28 animate-pulse" />
+            <div key={i} className="neu-card h-28 animate-pulse" aria-hidden />
           ))}
+          <span className="sr-only">Loading deadlines…</span>
         </div>
       ) : error ? (
-        <div className="neu-card flex flex-col items-center gap-3 p-8 text-center">
+        <div className="neu-card flex flex-col items-center gap-3 p-8 text-center" role="alert">
           <p className="text-sm text-danger">{error}</p>
-          <button onClick={() => void load()} className="btn-ghost">
-            <RefreshCw className="h-4 w-4" /> Retry
+          <button onClick={() => void load()} className="btn-ghost min-h-[44px]">
+            <RefreshCw className="h-4 w-4" aria-hidden /> Retry
           </button>
         </div>
       ) : showOnboarding ? (

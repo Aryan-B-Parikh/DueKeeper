@@ -132,8 +132,8 @@ export function EventForm({ initial, submitLabel, onSubmit }: EventFormProps) {
         <ReminderConfig value={reminders} onChange={setReminders} />
       </div>
 
-      <button type="submit" disabled={busy} className="btn-primary w-full sm:w-auto">
-        <SubmitIcon className="h-4 w-4" /> {busy ? 'Working…' : submitLabel}
+      <button type="submit" disabled={busy} className="btn-primary min-h-[44px] w-full sm:w-auto" aria-busy={busy}>
+        <SubmitIcon className="h-4 w-4" aria-hidden /> {busy ? 'Working…' : submitLabel}
       </button>
     </form>
   );
