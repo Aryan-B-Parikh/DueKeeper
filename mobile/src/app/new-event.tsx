@@ -5,6 +5,8 @@ import DateTimePicker from '@react-native-community/datetimepicker';
 import { Ionicons } from '@expo/vector-icons';
 import { eventsApi } from '../lib/api';
 import { theme } from '../constants/theme';
+import { enqueueOffline, syncQueue } from '../lib/offlineQueue';
+import { isOnline } from '../lib/offline';
 
 const TYPES = ['exam', 'submission', 'hackathon', 'other'] as const;
 
@@ -28,12 +30,13 @@ export default function NewEventScreen() {
     }
     setBusy(true);
     setError(null);
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
     try {
       await eventsApi.create({
         title: title.trim(),
         eventType,
         dueAt: due.toISOString(),
-        timezone: 'UTC',
+        timezone: tz,
         reminders: [
           { offsetSeconds: 86_400, channel: 'in_app' },
           { offsetSeconds: 3_600, channel: 'in_app' }
@@ -41,7 +44,15 @@ export default function NewEventScreen() {
       });
       router.replace('/(tabs)');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not create deadline');
+      const online = await isOnline();
+      if (!online) {
+        await enqueueOffline({ title: title.trim(), eventType, dueAt: due.toISOString(), timezone: tz });
+        setError('No internet — saved locally. Will sync when back online (pull to refresh on dashboard).');
+        // Try sync in background when online
+        void syncQueue();
+      } else {
+        setError(err instanceof Error ? err.message : 'Could not create deadline');
+      }
       setBusy(false);
     }
   }

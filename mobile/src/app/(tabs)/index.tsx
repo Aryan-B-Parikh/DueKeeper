@@ -13,6 +13,8 @@ import { Link, Stack } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { eventsApi, type EventItem } from '../../lib/api';
 import { statusColors, theme } from '../../constants/theme';
+import { saveEventsCache, loadEventsCache, formatLastSynced, isOnline } from '../../lib/offline';
+import { getQueue, syncQueue } from '../../lib/offlineQueue';
 
 const FILTERS = [
   { key: 'active', label: 'Active' },
@@ -27,13 +29,27 @@ export default function DashboardScreen() {
   const [query, setQuery] = useState('');
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [offline, setOffline] = useState(false);
+  const [lastSynced, setLastSynced] = useState<string | null>(null);
+  const [pendingOffline, setPendingOffline] = useState(0);
 
   const load = useCallback(async () => {
+    // Try to sync any offline-queued creates first
+    try { const { remaining } = await syncQueue(); setPendingOffline(remaining); } catch {}
     try {
       const { events: list } = await eventsApi.list({ status: filter });
       setEvents(list);
+      await saveEventsCache(list);
+      const { lastSynced: ls } = await loadEventsCache<EventItem>();
+      setLastSynced(ls);
+      setOffline(false);
+      const q = await getQueue(); setPendingOffline(q.length);
     } catch {
-      /* keep previous list on transient failures */
+      const cached = await loadEventsCache<EventItem>();
+      if (cached.events.length > 0) setEvents(cached.events as EventItem[]);
+      setLastSynced(cached.lastSynced);
+      setOffline(!(await isOnline()));
+      const q = await getQueue(); setPendingOffline(q.length);
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -42,6 +58,12 @@ export default function DashboardScreen() {
 
   useEffect(() => {
     void load();
+    // Load cached immediately so cold offline open is not blank
+    void (async () => {
+      const cached = await loadEventsCache<EventItem>();
+      if (cached.events.length > 0) setEvents(cached.events as EventItem[]);
+      setLastSynced(cached.lastSynced);
+    })();
   }, [load]);
 
   const visible = useMemo(() => {
@@ -73,6 +95,21 @@ export default function DashboardScreen() {
         }}
       />
       <View style={styles.container}>
+        {offline && (
+          <View style={styles.offlineBanner}>
+            <Ionicons name="cloud-offline-outline" size={14} color={theme.white} />
+            <Text style={styles.offlineText}>No internet — showing cached deadlines. {formatLastSynced(lastSynced)}</Text>
+          </View>
+        )}
+        {pendingOffline > 0 && (
+          <View style={styles.offlineBanner}>
+            <Ionicons name="time-outline" size={14} color={theme.white} />
+            <Text style={styles.offlineText}>{pendingOffline} deadline{pendingOffline>1?'s':''} waiting to sync — pull to refresh when online.</Text>
+          </View>
+        )}
+        {!offline && lastSynced && (
+          <Text style={styles.syncText}>{formatLastSynced(lastSynced)}</Text>
+        )}
         <View style={styles.searchRow}>
           <TextInput
             style={styles.search}
@@ -154,6 +191,9 @@ export default function DashboardScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: theme.surface, paddingHorizontal: 16 },
+  offlineBanner: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: theme.ink, borderRadius: 10, paddingHorizontal: 10, paddingVertical: 8, marginTop: 8 },
+  offlineText: { color: theme.white, fontSize: 12, fontWeight: '600', flex: 1 },
+  syncText: { fontSize: 11, color: theme.inkSoft, marginTop: 8, textAlign: 'right' },
   searchRow: { paddingTop: 8 },
   search: {
     borderWidth: 1,
